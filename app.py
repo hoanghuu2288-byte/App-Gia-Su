@@ -36,7 +36,7 @@ else:
     4. KHÔNG BAO GIỜ giải ra đáp án cuối cùng. Xưng "Thầy", gọi "Con".
     """
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
+        model_name="gemini-2.5-flash",
         system_instruction=luat_thep
     )
 
