@@ -2,33 +2,31 @@ import streamlit as st
 import google.generativeai as genai
 from PIL import Image
 
-# 1. CẤU HÌNH GIAO DIỆN WEB (Luôn để trên cùng)
+# 1. CẤU HÌNH GIAO DIỆN WEB
 st.set_page_config(page_title="Gia Sư AI", page_icon="🎓", layout="centered")
 
 # 2. HỆ THỐNG KHÓA CỔNG (PAYWALL)
 if "dang_nhap_thanh_cong" not in st.session_state:
     st.session_state.dang_nhap_thanh_cong = False
 
-# NẾU CHƯA ĐĂNG NHẬP -> HIỆN CỔNG BẢO VỆ
 if not st.session_state.dang_nhap_thanh_cong:
     st.title("🔒 Cổng Đăng Nhập Gia Sư AI")
     st.info("Chào ba mẹ! Vui lòng nhập mã bản quyền để kích hoạt Thầy giáo AI cho con nhé.")
     
-    # Ô nhập mật khẩu
     mat_khau = st.text_input("Nhập mã bản quyền:", type="password")
     if st.button("Mở Khóa 🚀"):
-        if mat_khau == "vip123": # ĐÂY LÀ MẬT KHẨU (Bạn có thể tự đổi sang chữ khác)
+        if mat_khau == "vip123": 
             st.session_state.dang_nhap_thanh_cong = True
-            st.rerun() # Tải lại trang để vào trong
+            st.rerun() 
         else:
             st.error("Mã bản quyền không chính xác! Ba mẹ vui lòng liên hệ Admin Linh.")
 
-# NẾU ĐÃ ĐĂNG NHẬP -> HIỆN APP GIA SƯ
 else:
-    # --- CỰC KỲ QUAN TRỌNG: DÁN LẠI API KEY CỦA BẠN VÀO DÒNG DƯỚI ---
-    genai.configure(api_key="AIzaSyDrTLXjmNSI8ICpzscBNbiEGEp66M4L-pU")
+    # --- BẢO MẬT API KEY: TỰ ĐỘNG LẤY TỪ KÉT SẮT ---
+    api_key_an = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=api_key_an)
 
-    # Luật Thép (Đã cập nhật ý tưởng "ngón tay" của Giám đốc)
+    # Luật Thép Sư Phạm
     luat_thep = """
     Bạn là một Thầy Giáo dạy Toán vô cùng kiên nhẫn và vui tính. 
     Luật bắt buộc: 
@@ -44,14 +42,13 @@ else:
 
     st.title("🎓 Gia Sư Toán Học Trí Tuệ Nhân Tạo")
     
-    # Tạo nút Đăng xuất ở góc phải
     col_trong, col_nut = st.columns([4, 1])
     with col_nut:
         if st.button("Đăng xuất 🚪"):
             st.session_state.dang_nhap_thanh_cong = False
             st.rerun()
 
-    # --- KHUNG SƯỜN CHAT CŨ BÊ VÀO ĐÂY ---
+    # --- KHUNG SƯỜN CHAT ---
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
