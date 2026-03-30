@@ -1,106 +1,294 @@
 import streamlit as st
-import google.generativeai as genai
 from PIL import Image
 
-# 1. CẤU HÌNH GIAO DIỆN WEB
-st.set_page_config(page_title="Gia Sư AI", page_icon="🎓", layout="centered")
+from prompts import get_system_prompt
+from gemini_client import (
+    generate_text_response,
+    generate_multimodal_response,
+)
+from logic import (
+    init_app_state,
+    reset_session,
+    build_initial_context,
+    classify_user_reply,
+    build_followup_context,
+    update_step_and_error,
+    build_summary_context,
+)
 
-# 2. HỆ THỐNG KHÓA CỔNG
+st.set_page_config(
+    page_title="Trợ lý học Toán lớp 3",
+    page_icon="🎓",
+    layout="centered"
+)
+
+init_app_state(st)
+
+# =========================
+# 1. CỔNG MỞ KHÓA ĐƠN GIẢN
+# =========================
 if "dang_nhap_thanh_cong" not in st.session_state:
     st.session_state.dang_nhap_thanh_cong = False
 
 if not st.session_state.dang_nhap_thanh_cong:
     st.title("🔒 Cổng Đăng Nhập Gia Sư AI")
-    st.info("Chào ba mẹ! Vui lòng nhập mã bản quyền để kích hoạt Thầy giáo AI cho con nhé.")
-    
+    st.info("Chào ba mẹ! Vui lòng nhập mã bản quyền để kích hoạt trợ lý học Toán cho con nhé.")
+
     mat_khau = st.text_input("Nhập mã bản quyền:", type="password")
+
     if st.button("Mở Khóa 🚀"):
-        if mat_khau == "vip123": 
+        if mat_khau == "vip123":
             st.session_state.dang_nhap_thanh_cong = True
-            st.rerun() 
+            st.rerun()
         else:
             st.error("Mã bản quyền không chính xác!")
 
 else:
-    # 3. KẾT NỐI KÉT SẮT LẤY CHÌA KHÓA
-    api_key_an = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key_an)
+    # =========================
+    # 2. HEADER
+    # =========================
+    st.title("🎓 Trợ lý học Toán lớp 3 cho phụ huynh bận rộn")
 
-    # 4. LUẬT THÉP SƯ PHẠM V5.1 (TƯ DUY MỚM Ý 80/20 & CHUẨN SGK)
-    luat_thep = """
-    Đóng vai: Bạn là một Gia sư Toán học Tiểu học vô cùng tận tâm, thấu hiểu tâm lý học sinh. Nhiệm vụ của bạn là dẫn dắt học sinh TỰ TÌM RA ĐÁP ÁN, tuyệt đối KHÔNG ĐƯỢC GIẢI HỘ. Xưng hô là "Thầy" và gọi "con".
-
-    NGUYÊN TẮC BẮT BUỘC (LUẬT V5.1):
-    1. TỪ VỰNG CHUẨN TIỂU HỌC: TUYỆT ĐỐI KHÔNG dùng từ ngữ người lớn/kỹ thuật như: "ráp số", "logic", "áp dụng", "vấn đề", "khối lượng... ra ngoài". CHỈ DÙNG từ ngữ thân thiện, chuẩn Sách Giáo Khoa: "viết phép tính", "thực hiện phép tính", "thêm vào", "bớt đi", "tìm đáp số".
-    2. CHỐNG CỘC LỐC & KHÔNG ĐÚT MỒI: Nếu học sinh gõ mỗi con số, yêu cầu viết rõ phép tính và đơn vị. Không bao giờ cho sẵn đáp án cuối cùng.
-    
-    3. PHƯƠNG PHÁP "MỚM Ý 80/20" & CÔNG THỨC 3 NHỊP (Bắt buộc khi học sinh bế tắc):
-       - Không hỏi dồn dập các bước nhỏ. AI tự động phân tích 80% vấn đề, chỉ yêu cầu học sinh làm 20% (chọn phép tính và tính toán).
-       - Nhịp 1 (Trực quan hóa): Dùng "Sơ đồ chữ" để tóm tắt. VD: "[Cả bao 50kg] = [Bột xi măng ? kg] + [Vỏ bao 200g]".
-       - Nhịp 2 (Mớm quy luật): Giải thích cặn kẽ bản chất bằng lời ngắn gọn. CHÚ Ý CHẶN BẪY ĐƠN VỊ (nếu đề có kg và g, phải nhắc học sinh đổi đơn vị trước khi tính).
-       - Nhịp 3 (Chuyền bóng): Chốt lại bằng ĐÚNG 1 CÂU HỎI yêu cầu học sinh tự viết phép tính. VD: "Vậy để bỏ đi phần vỏ bao, con sẽ dùng phép tính gì? Con hãy viết phép tính đó ra nhé!"
-    
-    4. QUY TẮC HIỂN THỊ (UX/UI):
-       - NGẮT DÒNG LIÊN TỤC: Tuyệt đối không viết đoạn văn dài.
-       - IN ĐẬM: BẮT BUỘC in đậm (**) các con số, phép tính, từ khóa (VD: **50kg**, **nhiều hơn**, **phép trừ**).
-       - DÙNG GẠCH ĐẦU DÒNG: Dùng (-) khi giải thích các bước hoặc sơ đồ để học sinh dễ đọc.
-    """
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=luat_thep
-    )
-
-    st.title("🎓 Gia Sư Toán Học Trí Tuệ Nhân Tạo")
-    
-    col_trong, col_nut = st.columns([4, 1])
-    with col_nut:
+    col_left, col_right = st.columns([4, 1])
+    with col_right:
         if st.button("Đăng xuất 🚪"):
             st.session_state.dang_nhap_thanh_cong = False
-            st.session_state.chat_history = []
+            reset_session(st)
             st.rerun()
 
-    # 5. KHUNG SƯỜN CHAT VÀ TRÍ NHỚ
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+    # =========================
+    # 3. CHỌN MODE & MỨC HỖ TRỢ
+    # =========================
+    st.subheader("1) Chọn cách dùng")
 
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    mode_label = st.radio(
+        "Chế độ",
+        options=["Con học cùng app", "Ba mẹ dạy con"],
+        horizontal=True
+    )
 
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        anh_tai_len = st.file_uploader("📸", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
-        
-    cau_hoi = st.chat_input("Con gõ bài toán hoặc câu trả lời vào đây nhé...")
+    st.session_state.mode = "child" if mode_label == "Con học cùng app" else "parent"
 
-    if cau_hoi or anh_tai_len:
-        with st.chat_message("user"):
-            if anh_tai_len:
-                img = Image.open(anh_tai_len)
-                st.image(img, caption="Ảnh gửi lên", width=200)
-            if cau_hoi:
-                st.markdown(cau_hoi)
-                
-        noi_dung_gui = cau_hoi if cau_hoi else "Thầy ơi xem giúp con ảnh này!"
-        st.session_state.chat_history.append({"role": "user", "content": noi_dung_gui})
+    support_map = {
+        "Tự nghĩ": "tu_nghi",
+        "Gợi ý nhẹ": "goi_y",
+        "Dẫn từng bước": "tung_buoc",
+        "Xem cách giải": "cach_giai",
+    }
 
-        # --- HỆ THỐNG TRUYỀN TRÍ NHỚ ---
-        ngu_canh_chat = "Lịch sử trò chuyện:\n"
-        for msg in st.session_state.chat_history:
-            vai_tro = "Học sinh" if msg["role"] == "user" else "Thầy giáo"
-            ngu_canh_chat += f"- {vai_tro}: {msg['content']}\n"
-        ngu_canh_chat += "\nNhiệm vụ: Dựa vào lịch sử trên, hãy trả lời câu mới nhất của Học sinh theo đúng Luật Thép V5.1."
+    support_label = st.radio(
+        "Mức hỗ trợ",
+        options=list(support_map.keys()),
+        index=1,
+        horizontal=True
+    )
 
-        with st.chat_message("assistant"):
-            with st.spinner("Thầy đang suy nghĩ..."):
+    st.session_state.support_level = support_map[support_label]
+    st.session_state.allow_full_solution = st.session_state.support_level == "cach_giai"
+
+    st.divider()
+
+    # =========================
+    # 4. NHẬP ĐỀ BÀI
+    # =========================
+    st.subheader("2) Nhập đề bài")
+
+    uploaded_file = st.file_uploader(
+        "Tải ảnh đề bài (nếu có)",
+        type=["png", "jpg", "jpeg"]
+    )
+
+    typed_problem = st.text_area(
+        "Hoặc gõ đề bài vào đây",
+        value=st.session_state.problem_text,
+        height=120,
+        placeholder="Ví dụ: Lan có 24 quyển vở, mẹ mua thêm cho Lan 8 quyển nữa. Hỏi Lan có tất cả bao nhiêu quyển vở?"
+    )
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        if st.button("Bắt đầu bài này ✨"):
+            if typed_problem.strip():
+                st.session_state.problem_text = typed_problem.strip()
+                st.session_state.problem_confirmed = True
+                st.session_state.chat_history = []
+
+                initial_context = build_initial_context(
+                    problem_text=st.session_state.problem_text,
+                    mode=st.session_state.mode,
+                    support_level=st.session_state.support_level
+                )
+
+                response = generate_text_response(
+                    system_prompt=get_system_prompt(st.session_state.mode),
+                    user_input=initial_context
+                )
+
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response
+                })
+                st.rerun()
+
+            elif uploaded_file is not None:
                 try:
-                    if anh_tai_len:
-                        response = model.generate_content([img, ngu_canh_chat])
-                    else:
-                        response = model.generate_content(ngu_canh_chat)
-                    
-                    loi_thay_day = response.text
-                    st.markdown(loi_thay_day)
-                    st.session_state.chat_history.append({"role": "assistant", "content": loi_thay_day})
+                    img = Image.open(uploaded_file)
+                    st.session_state.pending_image = img
+
+                    image_prompt = """
+Hãy đọc đúng nguyên văn đề toán trong ảnh.
+Chỉ trả về phần đề bài đã đọc được.
+Không giải bài.
+Không giải thích thêm.
+"""
+                    extracted_text = generate_multimodal_response(
+                        system_prompt="Bạn là trợ lý đọc đề bài từ ảnh.",
+                        image=img,
+                        user_input=image_prompt
+                    )
+
+                    st.session_state.problem_text = extracted_text.strip()
+                    st.session_state.problem_confirmed = False
+                    st.rerun()
+
                 except Exception as e:
-                    st.error(f"Lỗi hệ thống: {e}")
+                    st.error(f"Lỗi khi đọc ảnh: {e}")
+
+            else:
+                st.warning("Bạn hãy gõ đề bài hoặc tải ảnh lên trước nhé.")
+
+    with col_b:
+        if st.button("Làm bài mới 🧹"):
+            reset_session(st)
+            st.rerun()
+
+    # =========================
+    # 5. XÁC NHẬN ĐỀ BÀI TỪ ẢNH
+    # =========================
+    if st.session_state.problem_text and not st.session_state.problem_confirmed:
+        st.divider()
+        st.subheader("3) Xác nhận đề bài")
+
+        st.info("Thầy đọc đề như sau:")
+        st.text_area(
+            "Đề bài đã đọc",
+            value=st.session_state.problem_text,
+            height=150,
+            key="confirm_problem_text"
+        )
+
+        col_c, col_d = st.columns(2)
+
+        with col_c:
+            if st.button("Đúng rồi ✅"):
+                st.session_state.problem_text = st.session_state.confirm_problem_text
+                st.session_state.problem_confirmed = True
+                st.session_state.chat_history = []
+
+                initial_context = build_initial_context(
+                    problem_text=st.session_state.problem_text,
+                    mode=st.session_state.mode,
+                    support_level=st.session_state.support_level
+                )
+
+                response = generate_text_response(
+                    system_prompt=get_system_prompt(st.session_state.mode),
+                    user_input=initial_context
+                )
+
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response
+                })
+                st.rerun()
+
+        with col_d:
+            if st.button("Lưu đề đã sửa ✏️"):
+                st.session_state.problem_text = st.session_state.confirm_problem_text
+                st.success("Đã cập nhật đề bài. Nếu đúng rồi, bấm 'Đúng rồi ✅'.")
+
+    # =========================
+    # 6. KHUNG CHAT
+    # =========================
+    if st.session_state.problem_confirmed:
+        st.divider()
+        st.subheader("4) Học cùng app")
+
+        if st.session_state.problem_text:
+            st.caption(f"Đề bài hiện tại: {st.session_state.problem_text}")
+
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        placeholder_text = (
+            "Con trả lời ở đây nhé..."
+            if st.session_state.mode == "child"
+            else "Ba mẹ nhập câu hỏi hoặc tình huống của con ở đây..."
+        )
+
+        user_reply = st.chat_input(placeholder_text)
+
+        if user_reply:
+            st.session_state.chat_history.append({
+                "role": "user",
+                "content": user_reply
+            })
+
+            reply_type = classify_user_reply(user_reply)
+            update_step_and_error(st, reply_type)
+
+            followup_context = build_followup_context(
+                problem_text=st.session_state.problem_text,
+                mode=st.session_state.mode,
+                support_level=st.session_state.support_level,
+                chat_history=st.session_state.chat_history,
+                current_step=st.session_state.current_step,
+                last_error_type=st.session_state.last_error_type,
+                user_input=user_reply,
+                reply_type=reply_type,
+                allow_full_solution=st.session_state.allow_full_solution,
+            )
+
+            try:
+                response = generate_text_response(
+                    system_prompt=get_system_prompt(st.session_state.mode),
+                    user_input=followup_context
+                )
+
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response
+                })
+
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Lỗi khi tạo phản hồi: {e}")
+
+        # =========================
+        # 7. TÓM TẮT CUỐI BÀI
+        # =========================
+        st.divider()
+        if st.button("Tạo tóm tắt cho ba mẹ 📘"):
+            try:
+                summary_context = build_summary_context(
+                    problem_text=st.session_state.problem_text,
+                    chat_history=st.session_state.chat_history
+                )
+
+                summary_text = generate_text_response(
+                    system_prompt="Bạn là trợ lý tóm tắt buổi học Toán lớp 3 cho phụ huynh.",
+                    user_input=summary_context
+                )
+
+                st.session_state.summary = summary_text
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Lỗi khi tạo tóm tắt: {e}")
+
+        if st.session_state.summary:
+            st.subheader("Tóm tắt cho ba mẹ")
+            st.markdown(st.session_state.summary)
