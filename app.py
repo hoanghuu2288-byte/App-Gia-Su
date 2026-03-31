@@ -18,6 +18,8 @@ from logic import (
     looks_like_new_problem,
     start_new_problem,
     should_require_full_presentation,
+    is_small_error,
+    update_stuck_ui,
 )
 
 st.set_page_config(
@@ -74,7 +76,6 @@ else:
     st.session_state.mode = "child" if mode_label == "Con học cùng app" else "parent"
 
     support_map = {
-        "Tự nghĩ": "tu_nghi",
         "Gợi ý nhẹ": "goi_y",
         "Dẫn từng bước": "tung_buoc",
         "Xem cách giải": "cach_giai",
@@ -83,7 +84,7 @@ else:
     support_label = st.radio(
         "Mức hỗ trợ",
         options=list(support_map.keys()),
-        index=1,
+        index=0,
         horizontal=True
     )
 
@@ -119,6 +120,10 @@ else:
                 st.session_state.chat_history = []
                 st.session_state.summary = ""
                 st.session_state.presentation_retry_count = 0
+                st.session_state.stuck_count = 0
+                st.session_state.show_help_buttons = False
+                st.session_state.show_hint_button = False
+                st.session_state.show_solution_button = False
 
                 initial_context = build_initial_context(
                     problem_text=st.session_state.problem_text,
@@ -193,6 +198,10 @@ Không giải thích thêm.
                 st.session_state.chat_history = []
                 st.session_state.summary = ""
                 st.session_state.presentation_retry_count = 0
+                st.session_state.stuck_count = 0
+                st.session_state.show_help_buttons = False
+                st.session_state.show_hint_button = False
+                st.session_state.show_solution_button = False
 
                 initial_context = build_initial_context(
                     problem_text=st.session_state.problem_text,
@@ -223,12 +232,141 @@ Không giải thích thêm.
         st.divider()
         st.subheader("4) Học cùng app")
 
-        if st.session_state.problem_text:
-            st.caption(f"Đề bài hiện tại: {st.session_state.problem_text}")
+        st.caption(f"Đề bài hiện tại: {st.session_state.problem_text}")
 
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
+
+        # --------- NÚT PHỤ: CHỈ HIỆN KHI CẦN ----------
+        if st.session_state.mode == "child" and st.session_state.show_help_buttons:
+            st.markdown("**Hỗ trợ thêm:**")
+
+            help_cols = st.columns(3)
+
+            with help_cols[0]:
+                if st.button("Con chưa biết"):
+                    user_reply = "con không biết"
+                    st.session_state.chat_history.append({
+                        "role": "user",
+                        "content": user_reply
+                    })
+
+                    reply_type = classify_user_reply(user_reply)
+                    update_step_and_error(st, reply_type)
+                    update_stuck_ui(st, reply_type)
+
+                    require_full_presentation = should_require_full_presentation(st, user_reply)
+                    update_presentation_retry(st, require_full_presentation)
+                    small_error = is_small_error(user_reply)
+
+                    followup_context = build_followup_context(
+                        problem_text=st.session_state.problem_text,
+                        mode=st.session_state.mode,
+                        support_level=st.session_state.support_level,
+                        chat_history=st.session_state.chat_history,
+                        current_step=st.session_state.current_step,
+                        last_error_type=st.session_state.last_error_type,
+                        user_input=user_reply,
+                        reply_type=reply_type,
+                        allow_full_solution=st.session_state.allow_full_solution,
+                        require_full_presentation=require_full_presentation,
+                        small_error=small_error,
+                    )
+
+                    response = generate_text_response(
+                        system_prompt=get_system_prompt(st.session_state.mode),
+                        user_input=followup_context
+                    )
+
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": response
+                    })
+                    st.rerun()
+
+            with help_cols[1]:
+                if st.session_state.show_hint_button:
+                    if st.button("Gợi ý thêm"):
+                        user_reply = "con cần gợi ý thêm"
+                        st.session_state.chat_history.append({
+                            "role": "user",
+                            "content": user_reply
+                        })
+
+                        reply_type = "student_dont_know"
+                        update_step_and_error(st, reply_type)
+                        update_stuck_ui(st, reply_type)
+
+                        require_full_presentation = False
+                        update_presentation_retry(st, require_full_presentation)
+                        small_error = False
+
+                        followup_context = build_followup_context(
+                            problem_text=st.session_state.problem_text,
+                            mode=st.session_state.mode,
+                            support_level="tung_buoc",
+                            chat_history=st.session_state.chat_history,
+                            current_step=st.session_state.current_step,
+                            last_error_type=st.session_state.last_error_type,
+                            user_input=user_reply,
+                            reply_type=reply_type,
+                            allow_full_solution=False,
+                            require_full_presentation=require_full_presentation,
+                            small_error=small_error,
+                        )
+
+                        response = generate_text_response(
+                            system_prompt=get_system_prompt(st.session_state.mode),
+                            user_input=followup_context
+                        )
+
+                        st.session_state.chat_history.append({
+                            "role": "assistant",
+                            "content": response
+                        })
+                        st.rerun()
+
+            with help_cols[2]:
+                if st.session_state.show_solution_button:
+                    if st.button("Xem cách giải"):
+                        user_reply = "cho con xem cách giải"
+                        st.session_state.chat_history.append({
+                            "role": "user",
+                            "content": user_reply
+                        })
+
+                        reply_type = "student_asks_answer"
+                        update_step_and_error(st, reply_type)
+
+                        require_full_presentation = False
+                        update_presentation_retry(st, require_full_presentation)
+                        small_error = False
+
+                        followup_context = build_followup_context(
+                            problem_text=st.session_state.problem_text,
+                            mode=st.session_state.mode,
+                            support_level="cach_giai",
+                            chat_history=st.session_state.chat_history,
+                            current_step=st.session_state.current_step,
+                            last_error_type=st.session_state.last_error_type,
+                            user_input=user_reply,
+                            reply_type=reply_type,
+                            allow_full_solution=True,
+                            require_full_presentation=require_full_presentation,
+                            small_error=small_error,
+                        )
+
+                        response = generate_text_response(
+                            system_prompt=get_system_prompt(st.session_state.mode),
+                            user_input=followup_context
+                        )
+
+                        st.session_state.chat_history.append({
+                            "role": "assistant",
+                            "content": response
+                        })
+                        st.rerun()
 
         placeholder_text = (
             "Con trả lời ở đây nhé..."
@@ -268,9 +406,11 @@ Không giải thích thêm.
 
             reply_type = classify_user_reply(user_reply)
             update_step_and_error(st, reply_type)
+            update_stuck_ui(st, reply_type)
 
             require_full_presentation = should_require_full_presentation(st, user_reply)
             update_presentation_retry(st, require_full_presentation)
+            small_error = is_small_error(user_reply)
 
             followup_context = build_followup_context(
                 problem_text=st.session_state.problem_text,
@@ -283,6 +423,7 @@ Không giải thích thêm.
                 reply_type=reply_type,
                 allow_full_solution=st.session_state.allow_full_solution,
                 require_full_presentation=require_full_presentation,
+                small_error=small_error,
             )
 
             try:
