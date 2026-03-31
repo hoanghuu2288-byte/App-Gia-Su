@@ -13,7 +13,11 @@ from logic import (
     classify_user_reply,
     build_followup_context,
     update_step_and_error,
+    update_presentation_retry,
     build_summary_context,
+    looks_like_new_problem,
+    start_new_problem,
+    should_require_full_presentation,
 )
 
 st.set_page_config(
@@ -113,6 +117,8 @@ else:
                 st.session_state.problem_text = typed_problem.strip()
                 st.session_state.problem_confirmed = True
                 st.session_state.chat_history = []
+                st.session_state.summary = ""
+                st.session_state.presentation_retry_count = 0
 
                 initial_context = build_initial_context(
                     problem_text=st.session_state.problem_text,
@@ -185,6 +191,8 @@ Không giải thích thêm.
                 st.session_state.problem_text = st.session_state.confirm_problem_text
                 st.session_state.problem_confirmed = True
                 st.session_state.chat_history = []
+                st.session_state.summary = ""
+                st.session_state.presentation_retry_count = 0
 
                 initial_context = build_initial_context(
                     problem_text=st.session_state.problem_text,
@@ -236,8 +244,33 @@ Không giải thích thêm.
                 "content": user_reply
             })
 
+            # Nếu người dùng ném một đề bài mới vào khung chat, reset sang bài mới
+            if looks_like_new_problem(user_reply):
+                start_new_problem(st, user_reply)
+
+                initial_context = build_initial_context(
+                    problem_text=st.session_state.problem_text,
+                    mode=st.session_state.mode,
+                    support_level=st.session_state.support_level
+                )
+
+                response = generate_text_response(
+                    system_prompt=get_system_prompt(st.session_state.mode),
+                    user_input=initial_context
+                )
+
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response
+                })
+
+                st.rerun()
+
             reply_type = classify_user_reply(user_reply)
             update_step_and_error(st, reply_type)
+
+            require_full_presentation = should_require_full_presentation(st, user_reply)
+            update_presentation_retry(st, require_full_presentation)
 
             followup_context = build_followup_context(
                 problem_text=st.session_state.problem_text,
@@ -249,6 +282,7 @@ Không giải thích thêm.
                 user_input=user_reply,
                 reply_type=reply_type,
                 allow_full_solution=st.session_state.allow_full_solution,
+                require_full_presentation=require_full_presentation,
             )
 
             try:
