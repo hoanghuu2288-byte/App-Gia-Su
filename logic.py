@@ -22,6 +22,10 @@ def init_app_state(st):
         "summary": "",
         "pending_image": None,
         "presentation_retry_count": 0,
+        "stuck_count": 0,  # số lần học sinh bí
+        "show_help_buttons": False,
+        "show_hint_button": False,
+        "show_solution_button": False,
     }
 
     for key, value in defaults.items():
@@ -40,6 +44,10 @@ def reset_session(st):
     st.session_state.summary = ""
     st.session_state.pending_image = None
     st.session_state.presentation_retry_count = 0
+    st.session_state.stuck_count = 0
+    st.session_state.show_help_buttons = False
+    st.session_state.show_hint_button = False
+    st.session_state.show_solution_button = False
 
 
 def looks_like_new_problem(user_input: str) -> bool:
@@ -66,6 +74,10 @@ def start_new_problem(st, new_problem_text: str):
     st.session_state.chat_history = []
     st.session_state.summary = ""
     st.session_state.presentation_retry_count = 0
+    st.session_state.stuck_count = 0
+    st.session_state.show_help_buttons = False
+    st.session_state.show_hint_button = False
+    st.session_state.show_solution_button = False
 
 
 def build_initial_context(problem_text: str, mode: str, support_level: str) -> str:
@@ -125,18 +137,37 @@ def classify_user_reply(user_input: str) -> str:
     return "normal_reply"
 
 
+def is_small_error(user_input: str) -> bool:
+    """
+    Lỗi nhỏ: thiếu đơn vị, thiếu câu đầy đủ, nhưng phần số đã đúng hoặc gần đúng.
+    Heuristic đơn giản cho MVP.
+    """
+    text = user_input.strip().lower()
+
+    has_number = any(ch.isdigit() for ch in text)
+    has_equal = "=" in text
+    has_unit = any(
+        unit in text for unit in [
+            "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
+            "xi măng", "quả", "cái", "m", "viên"
+        ]
+    )
+
+    # Nếu có số mà chưa có đơn vị/phép tính rõ, thường là lỗi nhỏ về trình bày
+    if has_number and not has_equal and not has_unit:
+        return True
+
+    return False
+
+
 def should_require_full_presentation(st, user_input: str) -> bool:
-    """
-    Giảm việc bắt viết lại phép tính/đơn vị quá nhiều lần.
-    Chỉ nhắc tối đa 1 lần mạnh mẽ cho mỗi bước.
-    """
     text = user_input.strip().lower()
 
     has_equal = "=" in text
     has_unit = any(
         unit in text for unit in [
             "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
-            "xi măng", "quả", "cái", "m"
+            "xi măng", "quả", "cái", "m", "viên"
         ]
     )
 
@@ -147,6 +178,21 @@ def should_require_full_presentation(st, user_input: str) -> bool:
         return False
 
     return True
+
+
+def update_stuck_ui(st, reply_type: str):
+    if reply_type == "student_dont_know":
+        st.session_state.stuck_count += 1
+    else:
+        # nếu học sinh có trả lời bình thường, không reset hẳn về 0
+        # nhưng cũng không để stuck_count tăng vô hạn
+        st.session_state.stuck_count = max(0, st.session_state.stuck_count - 1)
+
+    st.session_state.show_help_buttons = st.session_state.stuck_count >= 1
+    st.session_state.show_hint_button = st.session_state.stuck_count >= 2
+    st.session_state.show_solution_button = (
+        st.session_state.stuck_count >= 3 or st.session_state.allow_full_solution
+    )
 
 
 def build_followup_context(
@@ -160,6 +206,7 @@ def build_followup_context(
     reply_type: str,
     allow_full_solution: bool,
     require_full_presentation: bool,
+    small_error: bool,
 ) -> str:
     system_prompt = get_system_prompt(mode)
     support_guide = get_support_guide(support_level)
@@ -174,6 +221,23 @@ def build_followup_context(
         if allow_full_solution
         else "Không được đưa lời giải đầy đủ hoặc đáp án cuối cùng ngay."
     )
+
+    if small_error:
+        error_rule = """
+- Đây là lỗi nhỏ.
+- Nếu học sinh đã ra đúng kết quả số hoặc gần đúng ý chính:
+  - công nhận điều đúng trước
+  - nhắc lỗi nhỏ ngắn gọn
+  - có thể tự chốt câu trả lời đầy đủ
+  - không giữ học sinh quá lâu
+"""
+    else:
+        error_rule = """
+- Nếu đây là lỗi lớn:
+  - chỉ ra đúng chỗ sai
+  - dạy tiếp ngắn gọn
+  - kéo học sinh làm tiếp bước đúng
+"""
 
     presentation_rule = (
         "Có thể yêu cầu học sinh viết rõ phép tính hoặc đơn vị, nhưng chỉ ngắn gọn, không lặp lại nhiều lần."
@@ -198,12 +262,14 @@ Trạng thái hiện tại:
 - last_error_type: {last_error_type}
 - reply_type: {reply_type}
 - allow_full_solution: {allow_full_solution}
+- small_error: {small_error}
 
 Luật rất quan trọng:
 - {full_solution_rule}
 - {presentation_rule}
+{error_rule}
 - Nếu reply_type là student_number_only:
-  - chỉ nhắc viết rõ phép tính hoặc đơn vị thật ngắn gọn
+  - chỉ nhắc viết rõ hơn thật ngắn
   - không kéo dài nhiều lượt
 - Nếu reply_type là student_dont_know:
   - tăng hỗ trợ thêm một nấc
@@ -218,7 +284,12 @@ Luật rất quan trọng:
   - tránh lặp lại nguyên dữ kiện dài dòng
 - Không được lẫn sang bài cũ
 - Chỉ bám đúng đề bài hiện tại
-- Mỗi lượt chỉ kết thúc bằng đúng 1 câu hỏi ngắn
+- Nếu học sinh đã có kết quả đúng nhưng thiếu đơn vị/câu đầy đủ:
+  - nói rõ là kết quả đúng rồi
+  - nhắc thêm phần còn thiếu
+  - rồi có thể tự chốt câu trả lời đầy đủ
+- Cuối bài nên có 1 câu chốt đáp án đầy đủ
+- Mỗi lượt chỉ kết thúc bằng đúng 1 câu hỏi ngắn, trừ khi đang chốt bài
 
 Tin nhắn mới nhất của người dùng:
 {user_input}
