@@ -22,7 +22,7 @@ def init_app_state(st):
         "summary": "",
         "pending_image": None,
         "presentation_retry_count": 0,
-        "stuck_count": 0,  # số lần học sinh bí
+        "stuck_count": 0,
         "show_help_buttons": False,
         "show_hint_button": False,
         "show_solution_button": False,
@@ -80,10 +80,26 @@ def start_new_problem(st, new_problem_text: str):
     st.session_state.show_solution_button = False
 
 
+def detect_problem_complexity(problem_text: str) -> str:
+    text = problem_text.lower()
+
+    multi_step_signals = [
+        "mỗi lần", "lần", "sau đó", "rồi", "còn phải", "còn lại",
+        "đổi đơn vị", "m ", "cm", "kg", "g", "1/2", "1/3", "1/4", "1/5"
+    ]
+
+    count = sum(1 for s in multi_step_signals if s in text)
+
+    if count >= 2:
+        return "medium_or_hard"
+    return "easy"
+
+
 def build_initial_context(problem_text: str, mode: str, support_level: str) -> str:
     system_prompt = get_system_prompt(mode)
     support_guide = get_support_guide(support_level)
     first_response_guide = get_first_response_guide()
+    complexity = detect_problem_complexity(problem_text)
 
     context = f"""
 {system_prompt}
@@ -95,17 +111,38 @@ def build_initial_context(problem_text: str, mode: str, support_level: str) -> s
 Đề bài đã xác nhận:
 {problem_text}
 
+Mức độ bài:
+{complexity}
+
 Yêu cầu rất quan trọng:
 - Đây là phản hồi đầu tiên sau khi đã có đề bài.
+- Nếu bài easy:
+  - mở đầu rất ngắn
+  - không cần nói dài về kiến thức
+- Nếu bài medium_or_hard:
+  - phải nêu rõ:
+    - Dạng bài
+    - Kiến thức dùng
+    - Hướng làm sơ lược
+- "Kiến thức dùng" phải nói đúng bản chất toán học đang dùng, ví dụ:
+  - phép cộng
+  - phép trừ
+  - phép nhân rồi phép trừ
+  - đổi đơn vị rồi trừ
+  - chia đều nên dùng phép chia
+- Không được nói mơ hồ kiểu:
+  - "Cốt lõi là tìm số còn lại"
+  - "Cốt lõi là tìm đáp án"
+- "Hướng làm" phải nói ngắn gọn bước đi, ví dụ:
+  - tính số đã mua trước, rồi lấy số cần có trừ số đã mua
+  - đổi về cùng đơn vị trước, rồi làm phép trừ
 - Nếu mode là child:
-  - chỉ trả lời NGẮN
-  - tối đa 2 câu ngắn + 1 câu hỏi
+  - tối đa 3 dòng ngắn + 1 câu hỏi
   - không giảng dài dòng
 - Nếu mode là parent:
   - ngắn, rõ, thực dụng
 - Không giải hộ ngay trừ khi support_level là 'cach_giai'
 - Nếu bài có dấu hiệu khác đơn vị, phải nhắc chú ý đổi về cùng đơn vị
-- Không dùng lời mở đầu quá dài
 """
     return context.strip()
 
@@ -138,10 +175,6 @@ def classify_user_reply(user_input: str) -> str:
 
 
 def is_small_error(user_input: str) -> bool:
-    """
-    Lỗi nhỏ: thiếu đơn vị, thiếu câu đầy đủ, nhưng phần số đã đúng hoặc gần đúng.
-    Heuristic đơn giản cho MVP.
-    """
     text = user_input.strip().lower()
 
     has_number = any(ch.isdigit() for ch in text)
@@ -153,7 +186,6 @@ def is_small_error(user_input: str) -> bool:
         ]
     )
 
-    # Nếu có số mà chưa có đơn vị/phép tính rõ, thường là lỗi nhỏ về trình bày
     if has_number and not has_equal and not has_unit:
         return True
 
@@ -184,8 +216,6 @@ def update_stuck_ui(st, reply_type: str):
     if reply_type == "student_dont_know":
         st.session_state.stuck_count += 1
     else:
-        # nếu học sinh có trả lời bình thường, không reset hẳn về 0
-        # nhưng cũng không để stuck_count tăng vô hạn
         st.session_state.stuck_count = max(0, st.session_state.stuck_count - 1)
 
     st.session_state.show_help_buttons = st.session_state.stuck_count >= 1
