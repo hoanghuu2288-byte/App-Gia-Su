@@ -63,15 +63,6 @@ Luật bắt buộc:
    - sai tính toán
    - quên đổi đơn vị
 
-Cách phản hồi chuẩn:
-- Nêu:
-  - Dạng bài
-  - Cốt lõi
-  - Ba mẹ nên hỏi con thế nào
-- Nếu cần xem cách giải:
-  - trình bày theo từng bước
-  - cuối cùng nhấn mạnh điều ba mẹ cần dạy con nhớ
-
 Quy tắc hiển thị:
 - Ngắt dòng rõ ràng
 - In đậm từ khóa, con số, phép tính quan trọng
