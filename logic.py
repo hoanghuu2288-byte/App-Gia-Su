@@ -21,7 +21,7 @@ def init_app_state(st):
         "chat_history": [],
         "summary": "",
         "pending_image": None,
-        "presentation_retry_count": 0,   # số lần đã nhắc viết rõ phép tính/đơn vị
+        "presentation_retry_count": 0,
     }
 
     for key, value in defaults.items():
@@ -45,7 +45,6 @@ def reset_session(st):
 def looks_like_new_problem(user_input: str) -> bool:
     text = user_input.strip().lower()
 
-    # dấu hiệu khá mạnh của một đề bài mới
     signals = [
         "hỏi", "một", "một cửa hàng", "một cuộn", "một thùng",
         "một thư viện", "một hình", "tính", "tìm x", "tìm",
@@ -134,13 +133,16 @@ def should_require_full_presentation(st, user_input: str) -> bool:
     text = user_input.strip().lower()
 
     has_equal = "=" in text
-    has_unit = any(unit in text for unit in ["bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét"])
+    has_unit = any(
+        unit in text for unit in [
+            "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
+            "xi măng", "quả", "cái", "m"
+        ]
+    )
 
-    # nếu đã có phép tính hoặc đơn vị tương đối rõ, không ép thêm
     if has_equal or has_unit:
         return False
 
-    # nếu đã nhắc rồi, cho qua để giữ nhịp
     if st.session_state.presentation_retry_count >= 1:
         return False
 
@@ -176,7 +178,7 @@ def build_followup_context(
     presentation_rule = (
         "Có thể yêu cầu học sinh viết rõ phép tính hoặc đơn vị, nhưng chỉ ngắn gọn, không lặp lại nhiều lần."
         if require_full_presentation
-        else "Không được giữ học sinh quá lâu ở việc viết lại phép tính/đơn vị nếu con đã hiểu ý chính."
+        else "Không được giữ học sinh quá lâu ở việc viết lại phép tính hoặc đơn vị nếu con đã hiểu ý chính."
     )
 
     context = f"""
@@ -201,7 +203,7 @@ Luật rất quan trọng:
 - {full_solution_rule}
 - {presentation_rule}
 - Nếu reply_type là student_number_only:
-  - chỉ nhắc viết rõ phép tính/đơn vị thật ngắn
+  - chỉ nhắc viết rõ phép tính hoặc đơn vị thật ngắn gọn
   - không kéo dài nhiều lượt
 - Nếu reply_type là student_dont_know:
   - tăng hỗ trợ thêm một nấc
