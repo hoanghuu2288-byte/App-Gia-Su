@@ -26,6 +26,7 @@ def init_app_state(st):
         "show_help_buttons": False,
         "show_hint_button": False,
         "show_solution_button": False,
+        "is_finished": False,
     }
 
     for key, value in defaults.items():
@@ -48,6 +49,7 @@ def reset_session(st):
     st.session_state.show_help_buttons = False
     st.session_state.show_hint_button = False
     st.session_state.show_solution_button = False
+    st.session_state.is_finished = False
 
 
 def looks_like_new_problem(user_input: str) -> bool:
@@ -78,6 +80,7 @@ def start_new_problem(st, new_problem_text: str):
     st.session_state.show_help_buttons = False
     st.session_state.show_hint_button = False
     st.session_state.show_solution_button = False
+    st.session_state.is_finished = False
 
 
 def detect_problem_complexity(problem_text: str) -> str:
@@ -85,7 +88,7 @@ def detect_problem_complexity(problem_text: str) -> str:
 
     multi_step_signals = [
         "mỗi lần", "lần", "sau đó", "rồi", "còn phải", "còn lại",
-        "đổi đơn vị", "m ", "cm", "kg", "g", "1/2", "1/3", "1/4", "1/5"
+        "đổi đơn vị", " cm", " kg", " g", "1/2", "1/3", "1/4", "1/5"
     ]
 
     count = sum(1 for s in multi_step_signals if s in text)
@@ -182,7 +185,7 @@ def is_small_error(user_input: str) -> bool:
     has_unit = any(
         unit in text for unit in [
             "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
-            "xi măng", "quả", "cái", "m", "viên"
+            "xi măng", "quả", "cái", "m", "viên", "gạch"
         ]
     )
 
@@ -199,7 +202,7 @@ def should_require_full_presentation(st, user_input: str) -> bool:
     has_unit = any(
         unit in text for unit in [
             "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
-            "xi măng", "quả", "cái", "m", "viên"
+            "xi măng", "quả", "cái", "m", "viên", "gạch"
         ]
     )
 
@@ -218,11 +221,30 @@ def update_stuck_ui(st, reply_type: str):
     else:
         st.session_state.stuck_count = max(0, st.session_state.stuck_count - 1)
 
+    if st.session_state.is_finished:
+        st.session_state.show_help_buttons = False
+        st.session_state.show_hint_button = False
+        st.session_state.show_solution_button = False
+        return
+
     st.session_state.show_help_buttons = st.session_state.stuck_count >= 1
     st.session_state.show_hint_button = st.session_state.stuck_count >= 2
     st.session_state.show_solution_button = (
         st.session_state.stuck_count >= 3 or st.session_state.allow_full_solution
     )
+
+
+def detect_finished_response(response_text: str) -> bool:
+    text = response_text.lower()
+    finish_signals = [
+        "đã hoàn thành bài toán này",
+        "đã làm xong bài này",
+        "đáp số",
+        "vậy mình sẽ nói là",
+        "con giỏi lắm! con đã hoàn thành",
+        "con đã hoàn thành bài này rồi"
+    ]
+    return any(s in text for s in finish_signals)
 
 
 def build_followup_context(
@@ -237,6 +259,8 @@ def build_followup_context(
     allow_full_solution: bool,
     require_full_presentation: bool,
     small_error: bool,
+    stuck_count: int,
+    is_finished: bool,
 ) -> str:
     system_prompt = get_system_prompt(mode)
     support_guide = get_support_guide(support_level)
@@ -269,10 +293,29 @@ def build_followup_context(
   - kéo học sinh làm tiếp bước đúng
 """
 
+    escalation_rule = f"""
+- stuck_count hiện tại là: {stuck_count}
+- Nếu stuck_count = 1:
+  - gợi ý nhẹ
+- Nếu stuck_count = 2:
+  - gợi ý rõ hơn, nêu số cần dùng hoặc nêu chọn phép tính
+- Nếu stuck_count >= 3:
+  - không được vòng vo nữa
+  - nói thẳng bước cần làm hoặc phép tính cần viết
+  - để học sinh làm bước cuối hoặc tính kết quả
+- Không được lặp cùng một ví dụ phụ quá nhiều lần
+"""
+
     presentation_rule = (
         "Có thể yêu cầu học sinh viết rõ phép tính hoặc đơn vị, nhưng chỉ ngắn gọn, không lặp lại nhiều lần."
         if require_full_presentation
         else "Không được giữ học sinh quá lâu ở việc viết lại phép tính hoặc đơn vị nếu con đã hiểu ý chính."
+    )
+
+    finish_rule = (
+        "Bài đã hoàn tất. Không hỏi hỗ trợ thêm. Chỉ chốt ngắn gọn nếu cần."
+        if is_finished
+        else "Nếu bài vừa hoàn tất, hãy chốt đáp án đầy đủ và chốt 1-2 ý kiến thức cần nhớ."
     )
 
     context = f"""
@@ -293,21 +336,23 @@ Trạng thái hiện tại:
 - reply_type: {reply_type}
 - allow_full_solution: {allow_full_solution}
 - small_error: {small_error}
+- is_finished: {is_finished}
 
 Luật rất quan trọng:
 - {full_solution_rule}
 - {presentation_rule}
 {error_rule}
+{escalation_rule}
 - Nếu reply_type là student_number_only:
   - chỉ nhắc viết rõ hơn thật ngắn
   - không kéo dài nhiều lượt
 - Nếu reply_type là student_dont_know:
-  - tăng hỗ trợ thêm một nấc
+  - tăng hỗ trợ theo stuck_count
   - ngắn gọn
   - có thể dùng sơ đồ chữ nếu thật cần
 - Nếu reply_type là student_asks_answer mà chưa được phép giải đầy đủ:
-  - từ chối nhẹ nhàng
-  - kéo về bước gần nhất
+  - từ chối nhẹ nhàng trước
+  - nếu con vẫn bí nhiều lần, được phép đưa bước làm rõ hơn
 - Nếu học sinh đã hiểu bước hiện tại, chuyển tiếp nhanh sang bước sau
 - Nếu mode là child:
   - tối đa 2 câu ngắn + 1 câu hỏi
@@ -318,7 +363,9 @@ Luật rất quan trọng:
   - nói rõ là kết quả đúng rồi
   - nhắc thêm phần còn thiếu
   - rồi có thể tự chốt câu trả lời đầy đủ
-- Cuối bài nên có 1 câu chốt đáp án đầy đủ
+- {finish_rule}
+- Sau khi chốt đáp án, thêm 1 dòng rất ngắn:
+  - Kiến thức cần nhớ: ...
 - Mỗi lượt chỉ kết thúc bằng đúng 1 câu hỏi ngắn, trừ khi đang chốt bài
 
 Tin nhắn mới nhất của người dùng:
