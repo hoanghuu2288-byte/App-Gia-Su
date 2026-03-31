@@ -20,6 +20,7 @@ from logic import (
     should_require_full_presentation,
     is_small_error,
     update_stuck_ui,
+    detect_finished_response,
 )
 
 st.set_page_config(
@@ -50,9 +51,6 @@ if not st.session_state.dang_nhap_thanh_cong:
             st.error("Mã bản quyền không chính xác!")
 
 else:
-    # =========================
-    # 2. HEADER
-    # =========================
     st.title("🎓 Trợ lý học Toán lớp 3 cho phụ huynh bận rộn")
 
     col_left, col_right = st.columns([4, 1])
@@ -62,9 +60,6 @@ else:
             reset_session(st)
             st.rerun()
 
-    # =========================
-    # 3. CHỌN MODE & MỨC HỖ TRỢ
-    # =========================
     st.subheader("1) Chọn cách dùng")
 
     mode_label = st.radio(
@@ -93,9 +88,6 @@ else:
 
     st.divider()
 
-    # =========================
-    # 4. NHẬP ĐỀ BÀI
-    # =========================
     st.subheader("2) Nhập đề bài")
 
     uploaded_file = st.file_uploader(
@@ -124,6 +116,7 @@ else:
                 st.session_state.show_help_buttons = False
                 st.session_state.show_hint_button = False
                 st.session_state.show_solution_button = False
+                st.session_state.is_finished = False
 
                 initial_context = build_initial_context(
                     problem_text=st.session_state.problem_text,
@@ -135,6 +128,8 @@ else:
                     system_prompt=get_system_prompt(st.session_state.mode),
                     user_input=initial_context
                 )
+
+                st.session_state.is_finished = detect_finished_response(response)
 
                 st.session_state.chat_history.append({
                     "role": "assistant",
@@ -174,9 +169,6 @@ Không giải thích thêm.
             reset_session(st)
             st.rerun()
 
-    # =========================
-    # 5. XÁC NHẬN ĐỀ BÀI TỪ ẢNH
-    # =========================
     if st.session_state.problem_text and not st.session_state.problem_confirmed:
         st.divider()
         st.subheader("3) Xác nhận đề bài")
@@ -202,6 +194,7 @@ Không giải thích thêm.
                 st.session_state.show_help_buttons = False
                 st.session_state.show_hint_button = False
                 st.session_state.show_solution_button = False
+                st.session_state.is_finished = False
 
                 initial_context = build_initial_context(
                     problem_text=st.session_state.problem_text,
@@ -214,6 +207,8 @@ Không giải thích thêm.
                     user_input=initial_context
                 )
 
+                st.session_state.is_finished = detect_finished_response(response)
+
                 st.session_state.chat_history.append({
                     "role": "assistant",
                     "content": response
@@ -225,9 +220,6 @@ Không giải thích thêm.
                 st.session_state.problem_text = st.session_state.confirm_problem_text
                 st.success("Đã cập nhật đề bài. Nếu đúng rồi, bấm 'Đúng rồi ✅'.")
 
-    # =========================
-    # 6. KHUNG CHAT
-    # =========================
     if st.session_state.problem_confirmed:
         st.divider()
         st.subheader("4) Học cùng app")
@@ -238,10 +230,13 @@ Không giải thích thêm.
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        # --------- NÚT PHỤ: CHỈ HIỆN KHI CẦN ----------
-        if st.session_state.mode == "child" and st.session_state.show_help_buttons:
+        # --------- NÚT PHỤ: CHỈ HIỆN KHI CẦN VÀ CHƯA KẾT THÚC ----------
+        if (
+            st.session_state.mode == "child"
+            and st.session_state.show_help_buttons
+            and not st.session_state.is_finished
+        ):
             st.markdown("**Hỗ trợ thêm:**")
-
             help_cols = st.columns(3)
 
             with help_cols[0]:
@@ -272,12 +267,20 @@ Không giải thích thêm.
                         allow_full_solution=st.session_state.allow_full_solution,
                         require_full_presentation=require_full_presentation,
                         small_error=small_error,
+                        stuck_count=st.session_state.stuck_count,
+                        is_finished=st.session_state.is_finished,
                     )
 
                     response = generate_text_response(
                         system_prompt=get_system_prompt(st.session_state.mode),
                         user_input=followup_context
                     )
+
+                    st.session_state.is_finished = detect_finished_response(response)
+                    if st.session_state.is_finished:
+                        st.session_state.show_help_buttons = False
+                        st.session_state.show_hint_button = False
+                        st.session_state.show_solution_button = False
 
                     st.session_state.chat_history.append({
                         "role": "assistant",
@@ -314,12 +317,20 @@ Không giải thích thêm.
                             allow_full_solution=False,
                             require_full_presentation=require_full_presentation,
                             small_error=small_error,
+                            stuck_count=st.session_state.stuck_count,
+                            is_finished=st.session_state.is_finished,
                         )
 
                         response = generate_text_response(
                             system_prompt=get_system_prompt(st.session_state.mode),
                             user_input=followup_context
                         )
+
+                        st.session_state.is_finished = detect_finished_response(response)
+                        if st.session_state.is_finished:
+                            st.session_state.show_help_buttons = False
+                            st.session_state.show_hint_button = False
+                            st.session_state.show_solution_button = False
 
                         st.session_state.chat_history.append({
                             "role": "assistant",
@@ -355,12 +366,20 @@ Không giải thích thêm.
                             allow_full_solution=True,
                             require_full_presentation=require_full_presentation,
                             small_error=small_error,
+                            stuck_count=st.session_state.stuck_count,
+                            is_finished=st.session_state.is_finished,
                         )
 
                         response = generate_text_response(
                             system_prompt=get_system_prompt(st.session_state.mode),
                             user_input=followup_context
                         )
+
+                        st.session_state.is_finished = detect_finished_response(response)
+                        if st.session_state.is_finished:
+                            st.session_state.show_help_buttons = False
+                            st.session_state.show_hint_button = False
+                            st.session_state.show_solution_button = False
 
                         st.session_state.chat_history.append({
                             "role": "assistant",
@@ -382,7 +401,6 @@ Không giải thích thêm.
                 "content": user_reply
             })
 
-            # Nếu người dùng ném một đề bài mới vào khung chat, reset sang bài mới
             if looks_like_new_problem(user_reply):
                 start_new_problem(st, user_reply)
 
@@ -396,6 +414,8 @@ Không giải thích thêm.
                     system_prompt=get_system_prompt(st.session_state.mode),
                     user_input=initial_context
                 )
+
+                st.session_state.is_finished = detect_finished_response(response)
 
                 st.session_state.chat_history.append({
                     "role": "assistant",
@@ -424,6 +444,8 @@ Không giải thích thêm.
                 allow_full_solution=st.session_state.allow_full_solution,
                 require_full_presentation=require_full_presentation,
                 small_error=small_error,
+                stuck_count=st.session_state.stuck_count,
+                is_finished=st.session_state.is_finished,
             )
 
             try:
@@ -431,6 +453,12 @@ Không giải thích thêm.
                     system_prompt=get_system_prompt(st.session_state.mode),
                     user_input=followup_context
                 )
+
+                st.session_state.is_finished = detect_finished_response(response)
+                if st.session_state.is_finished:
+                    st.session_state.show_help_buttons = False
+                    st.session_state.show_hint_button = False
+                    st.session_state.show_solution_button = False
 
                 st.session_state.chat_history.append({
                     "role": "assistant",
@@ -442,9 +470,6 @@ Không giải thích thêm.
             except Exception as e:
                 st.error(f"Lỗi khi tạo phản hồi: {e}")
 
-        # =========================
-        # 7. TÓM TẮT CUỐI BÀI
-        # =========================
         st.divider()
         if st.button("Tạo tóm tắt cho ba mẹ 📘"):
             try:
