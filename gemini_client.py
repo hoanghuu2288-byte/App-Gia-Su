@@ -4,6 +4,9 @@ import streamlit as st
 import google.generativeai as genai
 
 
+MODEL_NAME = "gemini-2.5-pro"
+
+
 def configure_gemini():
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
@@ -11,8 +14,8 @@ def configure_gemini():
 
 def get_model(system_prompt: str):
     return genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=system_prompt
+        model_name=MODEL_NAME,
+        system_instruction=system_prompt,
     )
 
 
