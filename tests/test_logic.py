@@ -1,6 +1,11 @@
 # tests/test_logic.py
 
+import os
+import sys
 from types import SimpleNamespace
+
+# Cho pytest thấy thư mục gốc của repo
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from logic import (
     looks_like_new_problem,
