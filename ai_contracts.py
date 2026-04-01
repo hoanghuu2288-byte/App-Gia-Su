@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 PARENT_REQUIRED_SECTIONS = (
     "Dạng bài",
     "Kiến thức dùng",
