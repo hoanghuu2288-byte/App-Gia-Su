@@ -29,7 +29,7 @@ class DummyStreamlit:
             problem_type="word_problem",
             current_step="step_2",
             last_error_type="khong_biet",
-            allow_full_solution=True,
+            allow_full_solution=False,
             chat_history=[{"role": "assistant", "content": "Old"}],
             summary="old summary",
             pending_image="img",
@@ -106,6 +106,7 @@ def test_update_stuck_ui_first_level():
     st = DummyStreamlit()
     st.session_state.is_finished = False
     st.session_state.stuck_count = 0
+    st.session_state.allow_full_solution = False
 
     update_stuck_ui(st, "student_dont_know")
 
@@ -119,6 +120,7 @@ def test_update_stuck_ui_second_level():
     st = DummyStreamlit()
     st.session_state.is_finished = False
     st.session_state.stuck_count = 1
+    st.session_state.allow_full_solution = False
 
     update_stuck_ui(st, "student_dont_know")
 
@@ -132,12 +134,24 @@ def test_update_stuck_ui_third_level():
     st = DummyStreamlit()
     st.session_state.is_finished = False
     st.session_state.stuck_count = 2
+    st.session_state.allow_full_solution = False
 
     update_stuck_ui(st, "student_dont_know")
 
     assert st.session_state.stuck_count == 3
     assert st.session_state.show_help_buttons is True
     assert st.session_state.show_hint_button is True
+    assert st.session_state.show_solution_button is True
+
+
+def test_update_stuck_ui_solution_shows_when_full_solution_allowed():
+    st = DummyStreamlit()
+    st.session_state.is_finished = False
+    st.session_state.stuck_count = 1
+    st.session_state.allow_full_solution = True
+
+    update_stuck_ui(st, "normal_reply")
+
     assert st.session_state.show_solution_button is True
 
 
