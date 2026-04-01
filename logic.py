@@ -119,31 +119,45 @@ Mức độ bài:
 
 Yêu cầu rất quan trọng:
 - Đây là phản hồi đầu tiên sau khi đã có đề bài.
-- Nếu bài easy:
-  - mở đầu rất ngắn
-  - không cần nói dài về kiến thức
-- Nếu bài medium_or_hard:
+- Nếu mode là child:
+  - Nếu bài easy:
+    - mở đầu rất ngắn
+  - Nếu bài medium_or_hard:
+    - phải nêu rõ:
+      - Dạng bài
+      - Kiến thức dùng
+      - Hướng làm sơ lược
+  - tối đa 3 dòng ngắn + 1 câu hỏi
+  - không giảng dài dòng
+
+- Nếu mode là parent:
+  - luôn ưu tiên trả lời theo kiểu TOÀN BÀI
   - phải nêu rõ:
     - Dạng bài
     - Kiến thức dùng
-    - Hướng làm sơ lược
+    - Hướng làm cả bài
+    - Lỗi dễ mắc
+    - Ba mẹ nên hỏi con
+  - nếu phù hợp có thể thêm:
+    - Lời giải mẫu ngắn
+  - không được hỏi phụ huynh từng bước như mode trẻ
+  - nên cố gắng giải thích gọn trong một lượt
+
 - "Kiến thức dùng" phải nói đúng bản chất toán học đang dùng, ví dụ:
   - phép cộng
   - phép trừ
   - phép nhân rồi phép trừ
   - đổi đơn vị rồi trừ
   - chia đều nên dùng phép chia
+
 - Không được nói mơ hồ kiểu:
   - "Cốt lõi là tìm số còn lại"
   - "Cốt lõi là tìm đáp án"
+
 - "Hướng làm" phải nói ngắn gọn bước đi, ví dụ:
   - tính số đã mua trước, rồi lấy số cần có trừ số đã mua
   - đổi về cùng đơn vị trước, rồi làm phép trừ
-- Nếu mode là child:
-  - tối đa 3 dòng ngắn + 1 câu hỏi
-  - không giảng dài dòng
-- Nếu mode là parent:
-  - ngắn, rõ, thực dụng
+
 - Không giải hộ ngay trừ khi support_level là 'cach_giai'
 - Nếu bài có dấu hiệu khác đơn vị, phải nhắc chú ý đổi về cùng đơn vị
 """
@@ -295,15 +309,16 @@ def build_followup_context(
 
     escalation_rule = f"""
 - stuck_count hiện tại là: {stuck_count}
-- Nếu stuck_count = 1:
-  - gợi ý nhẹ
-- Nếu stuck_count = 2:
-  - gợi ý rõ hơn, nêu số cần dùng hoặc nêu chọn phép tính
-- Nếu stuck_count >= 3:
-  - không được vòng vo nữa
-  - nói thẳng bước cần làm hoặc phép tính cần viết
-  - để học sinh làm bước cuối hoặc tính kết quả
-- Không được lặp cùng một ví dụ phụ quá nhiều lần
+- Nếu mode là child:
+  - stuck_count = 1: gợi ý nhẹ
+  - stuck_count = 2: gợi ý rõ hơn, nêu số cần dùng hoặc nêu chọn phép tính
+  - stuck_count >= 3:
+    - không được vòng vo nữa
+    - nói thẳng bước cần làm hoặc phép tính cần viết
+    - để học sinh làm bước cuối hoặc tính kết quả
+- Nếu mode là parent:
+  - không đi theo kiểu stuck_count từng bước như trẻ
+  - trả lời theo kiểu nhìn toàn bài, gói gọn vấn đề chính
 """
 
     presentation_rule = (
@@ -317,6 +332,24 @@ def build_followup_context(
         if is_finished
         else "Nếu bài vừa hoàn tất, hãy chốt đáp án đầy đủ và chốt 1-2 ý kiến thức cần nhớ."
     )
+
+    mode_rule = """
+- Nếu mode là child:
+  - tối đa 2 câu ngắn + 1 câu hỏi
+  - tránh lặp lại nguyên dữ kiện dài dòng
+  - dạy theo từng bước
+- Nếu mode là parent:
+  - ưu tiên giải thích TOÀN BÀI trong một lượt
+  - không hỏi phụ huynh từng bước như học sinh
+  - dùng cấu trúc:
+    - Dạng bài
+    - Kiến thức dùng
+    - Hướng làm cả bài
+    - Lỗi dễ mắc
+    - Ba mẹ nên hỏi con
+  - nếu phù hợp có thể thêm:
+    - Lời giải mẫu ngắn
+"""
 
     context = f"""
 {system_prompt}
@@ -343,20 +376,16 @@ Luật rất quan trọng:
 - {presentation_rule}
 {error_rule}
 {escalation_rule}
+{mode_rule}
 - Nếu reply_type là student_number_only:
   - chỉ nhắc viết rõ hơn thật ngắn
   - không kéo dài nhiều lượt
 - Nếu reply_type là student_dont_know:
-  - tăng hỗ trợ theo stuck_count
-  - ngắn gọn
-  - có thể dùng sơ đồ chữ nếu thật cần
+  - child: tăng hỗ trợ theo stuck_count
+  - parent: gom lại và giải thích toàn bài ngắn gọn hơn
 - Nếu reply_type là student_asks_answer mà chưa được phép giải đầy đủ:
-  - từ chối nhẹ nhàng trước
-  - nếu con vẫn bí nhiều lần, được phép đưa bước làm rõ hơn
-- Nếu học sinh đã hiểu bước hiện tại, chuyển tiếp nhanh sang bước sau
-- Nếu mode là child:
-  - tối đa 2 câu ngắn + 1 câu hỏi
-  - tránh lặp lại nguyên dữ kiện dài dòng
+  - child: từ chối nhẹ nhàng trước, rồi tăng hỗ trợ nếu bí nhiều lần
+  - parent: có thể cho hướng giải đầy đủ ngắn gọn hơn
 - Không được lẫn sang bài cũ
 - Chỉ bám đúng đề bài hiện tại
 - Nếu học sinh đã có kết quả đúng nhưng thiếu đơn vị/câu đầy đủ:
@@ -366,7 +395,7 @@ Luật rất quan trọng:
 - {finish_rule}
 - Sau khi chốt đáp án, thêm 1 dòng rất ngắn:
   - Kiến thức cần nhớ: ...
-- Mỗi lượt chỉ kết thúc bằng đúng 1 câu hỏi ngắn, trừ khi đang chốt bài
+- Nếu mode là parent, tránh kết thúc bằng câu hỏi nếu không cần thiết
 
 Tin nhắn mới nhất của người dùng:
 {user_input}
