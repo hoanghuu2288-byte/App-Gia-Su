@@ -1,11 +1,138 @@
 # logic.py
 
+import re
+import unicodedata
+
 from prompts import (
     get_system_prompt,
     get_support_guide,
     get_summary_prompt,
     get_first_response_guide,
 )
+
+
+def _strip_accents(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
+def _normalize_for_matching(text: str) -> str:
+    text = _strip_accents(text.lower())
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _infer_teaching_frame(problem_text: str) -> dict:
+    raw = problem_text.lower()
+    text = _normalize_for_matching(problem_text)
+
+    if "lien truoc" in text:
+        return {
+            "problem_type": "Số liền trước",
+            "knowledge": "Lấy số đã cho trừ 1",
+            "thinking": "Nhìn số đã cho rồi bớt đi 1",
+        }
+
+    if "lien sau" in text:
+        return {
+            "problem_type": "Số liền sau",
+            "knowledge": "Lấy số đã cho cộng 1",
+            "thinking": "Nhìn số đã cho rồi thêm 1",
+        }
+
+    if "hinh vuong" in text and ("canh" in text or "chu vi" in text or "doan day" in text):
+        return {
+            "problem_type": "Chu vi hình vuông",
+            "knowledge": "Lấy cạnh nhân 4",
+            "thinking": "Muốn biết độ dài quanh hình vuông thì tính 4 cạnh",
+        }
+
+    if "hinh chu nhat" in text and "chu vi" in text:
+        return {
+            "problem_type": "Chu vi hình chữ nhật",
+            "knowledge": "Lấy chiều dài cộng chiều rộng rồi nhân 2",
+            "thinking": "Tính tổng một chiều dài và một chiều rộng trước, rồi nhân 2",
+        }
+
+    if "chia deu" in text:
+        return {
+            "problem_type": "Chia đều",
+            "knowledge": "Phép chia",
+            "thinking": "Lấy tổng chia cho số phần bằng nhau",
+        }
+
+    if (
+        ("hop" in text or "thung" in text or "goi" in text)
+        and "tat ca" in text
+        and ("nhu nhau" in text or "moi" in text)
+    ):
+        return {
+            "problem_type": "Rút về đơn vị",
+            "knowledge": "Phép chia rồi phép nhân",
+            "thinking": "Tìm 1 phần trước, rồi từ 1 phần tính nhiều phần",
+        }
+
+    if (
+        (" m " in f" {text} " and " cm" in raw)
+        or (" kg" in raw and " g" in raw)
+        or ("met" in text and "xang ti met" in text)
+    ):
+        return {
+            "problem_type": "Đổi đơn vị rồi tính",
+            "knowledge": "Đổi về cùng đơn vị rồi cộng hoặc trừ",
+            "thinking": "Đưa các số đo về cùng một đơn vị trước rồi mới tính",
+        }
+
+    if "gap" in text and ("roi" in text or "sau do" in text or "tang" in text or "bot" in text or "tang ban" in text):
+        return {
+            "problem_type": "Bài nhiều bước",
+            "knowledge": "Phép nhân rồi cộng hoặc trừ",
+            "thinking": "Tính phần gấp lên trước, rồi làm bước tiếp theo",
+        }
+
+    if "gap" in text:
+        return {
+            "problem_type": "Gấp lên nhiều lần",
+            "knowledge": "Phép nhân",
+            "thinking": "Lấy số đã cho nhân với số lần",
+        }
+
+    if ("moi lan" in text or "3 lan" in text or "2 lan" in text or "4 lan" in text) and (
+        "con lai" in text or "con phai" in text or "sau khi" in text or "da ban" in text
+    ):
+        return {
+            "problem_type": "Bài nhiều bước",
+            "knowledge": "Phép nhân rồi phép trừ",
+            "thinking": "Tính phần đã có hoặc đã bán trước, rồi tìm phần còn lại",
+        }
+
+    if "mot so" in text and "tim so do" in text and "tru" in text:
+        return {
+            "problem_type": "Tìm thành phần chưa biết",
+            "knowledge": "Tìm số bị trừ khi biết hiệu và số trừ",
+            "thinking": "Muốn tìm số bị trừ thì lấy hiệu cộng số trừ",
+        }
+
+    if "mot so" in text and "tim so do" in text and "chia" in text:
+        return {
+            "problem_type": "Tìm thành phần chưa biết",
+            "knowledge": "Tìm số bị chia khi biết thương và số chia",
+            "thinking": "Muốn tìm số bị chia thì lấy thương nhân số chia",
+        }
+
+    if "o trong" in text or "->" in problem_text or "→" in problem_text:
+        return {
+            "problem_type": "Chuỗi thao tác",
+            "knowledge": "Làm lần lượt từng phép tính theo thứ tự",
+            "thinking": "Tính ô trước rồi mới dùng kết quả để tính ô sau",
+        }
+
+    return {
+        "problem_type": "Bài toán có lời văn",
+        "knowledge": "Đọc kỹ đề để chọn phép tính phù hợp",
+        "thinking": "Xem bài đang hỏi gì rồi tìm bước cần làm trước",
+    }
 
 
 def init_app_state(st):
@@ -58,10 +185,11 @@ def looks_like_new_problem(user_input: str) -> bool:
     signals = [
         "hỏi", "một", "một cửa hàng", "một cuộn", "một thùng",
         "một thư viện", "một hình", "tính", "tìm x", "tìm",
-        "bao nhiêu", "còn lại", "chia đều", "chiều dài", "chiều rộng"
+        "bao nhiêu", "còn lại", "chia đều", "chiều dài", "chiều rộng",
+        "câu 1", "khoanh", "số liền trước", "số liền sau"
     ]
 
-    long_enough = len(text) >= 35
+    long_enough = len(text) >= 20
     has_signal = any(s in text for s in signals)
 
     return long_enough and has_signal
@@ -88,7 +216,8 @@ def detect_problem_complexity(problem_text: str) -> str:
 
     multi_step_signals = [
         "mỗi lần", "lần", "sau đó", "rồi", "còn phải", "còn lại",
-        "đổi đơn vị", " cm", " kg", " g", "1/2", "1/3", "1/4", "1/5"
+        "đổi đơn vị", " cm", " kg", " g", "1/2", "1/3", "1/4", "1/5",
+        "gấp", "như nhau", "tất cả", "chu vi", "ô trống", "→", "->"
     ]
 
     count = sum(1 for s in multi_step_signals if s in text)
@@ -103,6 +232,7 @@ def build_initial_context(problem_text: str, mode: str, support_level: str) -> s
     support_guide = get_support_guide(support_level)
     first_response_guide = get_first_response_guide()
     complexity = detect_problem_complexity(problem_text)
+    frame = _infer_teaching_frame(problem_text)
 
     context = f"""
 {system_prompt}
@@ -117,18 +247,37 @@ def build_initial_context(problem_text: str, mode: str, support_level: str) -> s
 Mức độ bài:
 {complexity}
 
+Khung tư duy gợi ý cho bài này:
+- Dạng bài phù hợp: {frame["problem_type"]}
+- Kiến thức dùng phù hợp: {frame["knowledge"]}
+- Cách nghĩ nhanh: {frame["thinking"]}
+
 Yêu cầu rất quan trọng:
 - Đây là phản hồi đầu tiên sau khi đã có đề bài.
 - Nếu mode là child:
   - Nếu bài easy:
     - mở đầu rất ngắn
+    - vào thẳng bài, không cần chào xã giao dài
+    - vẫn nên cho con thấy "khung tư duy mini":
+      - Dạng bài
+      - Kiến thức dùng
+      - Cách nghĩ nhanh
   - Nếu bài medium_or_hard:
     - phải nêu rõ:
       - Dạng bài
       - Kiến thức dùng
-      - Hướng làm sơ lược
+      - Cách nghĩ nhanh
+  - ưu tiên cấu trúc:
+    - Dạng bài: ...
+    - Kiến thức dùng: ...
+    - Cách nghĩ nhanh: ...
+    - rồi kết thúc bằng đúng 1 câu hỏi để con làm bước đầu tiên
   - tối đa 3 dòng ngắn + 1 câu hỏi
   - không giảng dài dòng
+  - không mở đầu cụt ngủn chỉ bằng một câu hỏi
+  - không lặp lại kiểu chào xã giao dài như:
+    - "Thầy chào con!"
+    - "Thầy trò mình cùng làm bài này nhé!"
 
 - Nếu mode là parent:
   - luôn ưu tiên trả lời theo kiểu TOÀN BÀI
@@ -149,14 +298,17 @@ Yêu cầu rất quan trọng:
   - phép nhân rồi phép trừ
   - đổi đơn vị rồi trừ
   - chia đều nên dùng phép chia
+  - rút về đơn vị: chia rồi nhân
+  - chu vi hình vuông: cạnh nhân 4
 
 - Không được nói mơ hồ kiểu:
   - "Cốt lõi là tìm số còn lại"
   - "Cốt lõi là tìm đáp án"
 
-- "Hướng làm" phải nói ngắn gọn bước đi, ví dụ:
+- "Cách nghĩ nhanh" hoặc "Hướng làm" phải nói ngắn gọn bước đi, ví dụ:
   - tính số đã mua trước, rồi lấy số cần có trừ số đã mua
   - đổi về cùng đơn vị trước, rồi làm phép trừ
+  - tìm 1 phần trước, rồi tìm nhiều phần
 
 - Không giải hộ ngay trừ khi support_level là 'cach_giai'
 - Nếu bài có dấu hiệu khác đơn vị, phải nhắc chú ý đổi về cùng đơn vị
@@ -165,26 +317,75 @@ Yêu cầu rất quan trọng:
 
 
 def classify_user_reply(user_input: str) -> str:
-    text = user_input.strip().lower()
-
-    if not text:
+    raw_text = user_input.strip()
+    if not raw_text:
         return "empty"
 
+    text = raw_text.lower()
+    normalized = _normalize_for_matching(raw_text)
+    compact = normalized.replace(" ", "")
+
+    exact_dont_know = {
+        "khong",
+        "ko",
+        "k",
+        "khongbiet",
+        "khongbieet",
+        "kobiet",
+        "kbiet",
+        "khonghieu",
+        "kohieu",
+        "chuabiet",
+        "chuabieet",
+    }
     dont_know_signals = [
-        "không biết", "ko biết", "k biết", "con không biết",
-        "khó quá", "bí", "con bí", "không hiểu", "ko hiểu", "là sao"
+        "khong biet",
+        "ko biet",
+        "k biet",
+        "con khong biet",
+        "con ko biet",
+        "khong hieu",
+        "ko hieu",
+        "khong ro",
+        "la sao",
+        "kho qua",
+        "con bi",
+        "bi qua",
+        "khong lam duoc",
+        "ko lam duoc",
+        "khong biet lam",
+        "khong biet nua",
+        "khong biet that",
+        "van khong biet",
+        "chua biet",
+        "chua biet nua",
+        "chua hieu",
+        "khong biey",
+        "khong biet",
     ]
-    if any(signal in text for signal in dont_know_signals):
+
+    if normalized in exact_dont_know or compact in exact_dont_know:
+        return "student_dont_know"
+
+    if any(signal in normalized for signal in dont_know_signals):
         return "student_dont_know"
 
     ask_answer_signals = [
-        "đáp án", "giải luôn", "cho con đáp án", "cho đáp án",
-        "giải hộ", "làm hộ", "cho con kết quả"
+        "dap an",
+        "giai luon",
+        "cho con dap an",
+        "cho dap an",
+        "giai ho",
+        "lam ho",
+        "cho con ket qua",
+        "noi dap an",
+        "cho con loi giai",
+        "cho con xem dap an",
     ]
-    if any(signal in text for signal in ask_answer_signals):
+    if any(signal in normalized for signal in ask_answer_signals):
         return "student_asks_answer"
 
-    cleaned = text.replace(",", "").replace(".", "").replace(" ", "")
+    cleaned = re.sub(r"[\s,\.]", "", text)
     if cleaned.isdigit():
         return "student_number_only"
 
@@ -195,15 +396,18 @@ def is_small_error(user_input: str) -> bool:
     text = user_input.strip().lower()
 
     has_number = any(ch.isdigit() for ch in text)
-    has_equal = "=" in text
+    has_equal = "=" in text or "x" in text or ":" in text or "-" in text or "+" in text
     has_unit = any(
         unit in text for unit in [
             "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
-            "xi măng", "quả", "cái", "m", "viên", "gạch"
+            "xi măng", "quả", "cái", "m", "viên", "gạch", "bút", "hoa"
         ]
     )
 
-    if has_number and not has_equal and not has_unit:
+    if has_number and not has_unit:
+        return True
+
+    if has_number and has_equal and not has_unit:
         return True
 
     return False
@@ -216,7 +420,7 @@ def should_require_full_presentation(st, user_input: str) -> bool:
     has_unit = any(
         unit in text for unit in [
             "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
-            "xi măng", "quả", "cái", "m", "viên", "gạch"
+            "xi măng", "quả", "cái", "m", "viên", "gạch", "bút", "hoa"
         ]
     )
 
@@ -278,10 +482,14 @@ def build_followup_context(
 ) -> str:
     system_prompt = get_system_prompt(mode)
     support_guide = get_support_guide(support_level)
+    frame = _infer_teaching_frame(problem_text)
 
     history_text = ""
     for msg in chat_history[-6:]:
-        role = "Học sinh" if msg["role"] == "user" else "Thầy"
+        if mode == "parent":
+            role = "Ba mẹ" if msg["role"] == "user" else "Trợ lý"
+        else:
+            role = "Học sinh" if msg["role"] == "user" else "Thầy"
         history_text += f"- {role}: {msg['content']}\n"
 
     full_solution_rule = (
@@ -298,6 +506,9 @@ def build_followup_context(
   - nhắc lỗi nhỏ ngắn gọn
   - có thể tự chốt câu trả lời đầy đủ
   - không giữ học sinh quá lâu
+- Nếu học sinh chỉ thiếu đơn vị hoặc thiếu câu trả lời đầy đủ:
+  - chỉ nhắc thêm đúng 1 ý còn thiếu
+  - ưu tiên chốt trong tối đa 1 lượt tiếp theo
 """
     else:
         error_rule = """
@@ -333,14 +544,38 @@ def build_followup_context(
         else "Nếu bài vừa hoàn tất, hãy chốt đáp án đầy đủ và chốt 1-2 ý kiến thức cần nhớ."
     )
 
-    mode_rule = """
+    mode_rule = f"""
+- Khung tư duy gợi ý cho bài này:
+  - Dạng bài: {frame["problem_type"]}
+  - Kiến thức dùng: {frame["knowledge"]}
+  - Cách nghĩ nhanh: {frame["thinking"]}
+
 - Nếu mode là child:
   - tối đa 2 câu ngắn + 1 câu hỏi
   - tránh lặp lại nguyên dữ kiện dài dòng
   - dạy theo từng bước
+  - không chỉ dắt thao tác; phải cho con thấy mình đang làm bài theo dạng gì và dùng kiến thức gì
+  - nếu con đang bí, ưu tiên nhắc lại "Cách nghĩ nhanh" thật ngắn trước khi hỏi tiếp
+  - tránh mở đầu lặp lại y hệt nhiều lượt như:
+    - "Thầy hiểu rồi."
+    - "Không sao con."
+    - "Thầy chào con!"
+  - nếu cần động viên, chỉ dùng 1 cụm rất ngắn rồi vào ngay việc chính
+  - nếu học sinh đã có đúng kết quả số nhưng thiếu đơn vị hoặc thiếu câu đầy đủ:
+    - chỉ nhắc thêm 1 ý còn thiếu
+    - sau đó chốt luôn khi con bổ sung đúng
+    - không kéo dài thêm nhiều câu hỏi nhỏ
+  - khi phù hợp, có thể nhắc rất ngắn theo mẫu:
+    - Dạng bài: ...
+    - Kiến thức dùng: ...
+    - Cách nghĩ nhanh: ...
+  - nhưng phải gọn, không giảng thành đoạn dài
+
 - Nếu mode là parent:
   - ưu tiên giải thích TOÀN BÀI trong một lượt
   - không hỏi phụ huynh từng bước như học sinh
+  - tuyệt đối không gọi người dùng là "con"
+  - nếu phụ huynh nhắn ngắn kiểu "không biết", vẫn hiểu là đang hỏi thay con hoặc hỏi tiếp cho con
   - dùng cấu trúc:
     - Dạng bài
     - Kiến thức dùng
@@ -380,9 +615,13 @@ Luật rất quan trọng:
 - Nếu reply_type là student_number_only:
   - chỉ nhắc viết rõ hơn thật ngắn
   - không kéo dài nhiều lượt
+  - nếu con đã có đúng kết quả số thì chỉ hỏi thêm phần còn thiếu rồi chốt nhanh
 - Nếu reply_type là student_dont_know:
-  - child: tăng hỗ trợ theo stuck_count
-  - parent: gom lại và giải thích toàn bài ngắn gọn hơn
+  - child:
+    - tăng hỗ trợ theo stuck_count
+    - ưu tiên nhắc lại kiến thức đang dùng hoặc cách nghĩ nhanh trước
+  - parent:
+    - gom lại và giải thích toàn bài ngắn gọn hơn
 - Nếu reply_type là student_asks_answer mà chưa được phép giải đầy đủ:
   - child: từ chối nhẹ nhàng trước, rồi tăng hỗ trợ nếu bí nhiều lần
   - parent: có thể cho hướng giải đầy đủ ngắn gọn hơn
@@ -392,10 +631,19 @@ Luật rất quan trọng:
   - nói rõ là kết quả đúng rồi
   - nhắc thêm phần còn thiếu
   - rồi có thể tự chốt câu trả lời đầy đủ
+- Nếu học sinh trả lời các mảnh đúng như:
+  - từ khóa ngắn
+  - phép tính
+  - vài số đúng
+  thì hiểu là con đang có ý đúng một phần; hãy tận dụng để ghép lại và dạy tiếp, không coi như hoàn toàn không biết
 - {finish_rule}
 - Sau khi chốt đáp án, thêm 1 dòng rất ngắn:
   - Kiến thức cần nhớ: ...
-- Nếu mode là parent, tránh kết thúc bằng câu hỏi nếu không cần thiết
+- Dòng "Kiến thức cần nhớ" nên ưu tiên chốt theo mẫu tư duy, ví dụ:
+  - tìm 1 phần trước rồi tìm nhiều phần
+  - đổi về cùng đơn vị trước rồi mới tính
+  - tính phần đã bán trước rồi tìm phần còn lại
+- Nếu mode là parent, tránh kết thúc bằng câu hỏi nếu không cần
 
 Tin nhắn mới nhất của người dùng:
 {user_input}
