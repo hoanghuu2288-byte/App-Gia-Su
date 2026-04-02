@@ -55,13 +55,6 @@ def _infer_teaching_frame(problem_text: str) -> dict:
             "thinking": "Tính tổng một chiều dài và một chiều rộng trước, rồi nhân 2",
         }
 
-    if "chia deu" in text:
-        return {
-            "problem_type": "Chia đều",
-            "knowledge": "Phép chia",
-            "thinking": "Lấy tổng chia cho số phần bằng nhau",
-        }
-
     if (
         ("hop" in text or "thung" in text or "goi" in text)
         and "tat ca" in text
@@ -71,6 +64,13 @@ def _infer_teaching_frame(problem_text: str) -> dict:
             "problem_type": "Rút về đơn vị",
             "knowledge": "Phép chia rồi phép nhân",
             "thinking": "Tìm 1 phần trước, rồi từ 1 phần tính nhiều phần",
+        }
+
+    if "chia deu" in text:
+        return {
+            "problem_type": "Chia đều",
+            "knowledge": "Phép chia",
+            "thinking": "Lấy tổng chia cho số phần bằng nhau",
         }
 
     if (
@@ -106,7 +106,7 @@ def _infer_teaching_frame(problem_text: str) -> dict:
         }
 
     if (
-        ("moi lan" in text or "moi chong" in text or "moi gio" in text or "3 lan" in text or "2 lan" in text or "4 lan" in text)
+        ("moi lan" in text or "moi chong" in text or "3 lan" in text or "2 lan" in text or "4 lan" in text)
         and ("ban" in text or "con lai" in text or "con phai" in text or "sau khi" in text)
     ):
         return {
@@ -218,7 +218,7 @@ def detect_problem_complexity(problem_text: str) -> str:
     multi_step_signals = [
         "mỗi lần", "lần", "sau đó", "rồi", "còn phải", "còn lại",
         "đổi đơn vị", " cm", " kg", " g", "1/2", "1/3", "1/4", "1/5",
-        "gấp", "như nhau", "tất cả", "chu vi", "ô trống", "→", "->"
+        "gấp", "chu vi", "ô trống", "→", "->"
     ]
 
     count = sum(1 for s in multi_step_signals if s in text)
