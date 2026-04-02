@@ -136,6 +136,105 @@ def _infer_teaching_frame(problem_text: str) -> dict:
     }
 
 
+def _build_step_plan(problem_text: str, frame: dict) -> list[str]:
+    text = _normalize_for_matching(problem_text)
+    pt = frame["problem_type"]
+    knowledge = frame["knowledge"]
+
+    if pt == "Rút về đơn vị":
+        return [
+            "Bước 1: tìm 1 phần trước.",
+            "Bước 2: từ 1 phần tính nhiều phần.",
+        ]
+
+    if pt == "Đổi đơn vị rồi tính":
+        return [
+            "Bước 1: đổi các số đo về cùng một đơn vị.",
+            "Bước 2: làm phép tính theo đề bài.",
+        ]
+
+    if pt == "Chu vi hình vuông":
+        return [
+            "Bước 1: lấy cạnh nhân 4 để ra chu vi.",
+        ]
+
+    if pt == "Chu vi hình chữ nhật":
+        return [
+            "Bước 1: cộng chiều dài với chiều rộng.",
+            "Bước 2: lấy kết quả nhân 2.",
+        ]
+
+    if pt == "Số liền trước":
+        return [
+            "Bước 1: lấy số đã cho trừ 1.",
+        ]
+
+    if pt == "Số liền sau":
+        return [
+            "Bước 1: lấy số đã cho cộng 1.",
+        ]
+
+    if pt == "Chuỗi thao tác":
+        return [
+            "Bước 1: tính ô đầu tiên.",
+            "Bước 2: dùng kết quả đó để tính ô tiếp theo.",
+        ]
+
+    if pt == "Tìm thành phần chưa biết":
+        return [
+            "Bước 1: dùng đúng quy tắc tìm thành phần chưa biết.",
+        ]
+
+    if pt == "Bài nhiều bước":
+        if "tru" in _normalize_for_matching(knowledge):
+            return [
+                "Bước 1: tính phần đã có hoặc đã bán trước.",
+                "Bước 2: tính phần còn lại hoặc còn thiếu.",
+            ]
+        return [
+            "Bước 1: làm bước trung gian trước.",
+            "Bước 2: dùng kết quả đó làm bước tiếp theo.",
+        ]
+
+    if pt == "Chia đều":
+        return [
+            "Bước 1: lấy tổng chia cho số phần bằng nhau.",
+        ]
+
+    if pt == "Gấp lên nhiều lần":
+        return [
+            "Bước 1: lấy số đã cho nhân với số lần.",
+        ]
+
+    return [
+        "Bước 1: xác định điều cần tìm trước.",
+        "Bước 2: chọn phép tính đúng để làm.",
+    ]
+
+
+def _infer_current_step_hint(problem_text: str, chat_history: list) -> str:
+    frame = _infer_teaching_frame(problem_text)
+    plan = _build_step_plan(problem_text, frame)
+    history_text = _normalize_for_matching(" ".join(msg["content"] for msg in chat_history[-10:]))
+
+    if frame["problem_type"] == "Rút về đơn vị":
+        if any(s in history_text for s in ["1 hop co", "moi hop co", "48 chia 6", "48 6 bang 8", "bang 8"]):
+            return "Hiện tại đang ở bước 2: từ 1 phần tính nhiều phần."
+        return "Hiện tại đang ở bước 1: tìm 1 phần trước."
+
+    if frame["problem_type"] == "Đổi đơn vị rồi tính":
+        if any(s in history_text for s in ["325 cm", "bang 325", "doi xong", "cung don vi"]):
+            return "Hiện tại đang ở bước 2: làm phép tính sau khi đã đổi đơn vị."
+        return "Hiện tại đang ở bước 1: đổi về cùng một đơn vị trước."
+
+    if frame["problem_type"] == "Bài nhiều bước":
+        if any(s in history_text for s in ["35 quy", "54 000", "54000", "da mua", "da ban"]):
+            return "Hiện tại đang ở bước 2: dùng kết quả trung gian để tìm phần còn lại hoặc còn thiếu."
+        return "Hiện tại đang ở bước 1: làm bước trung gian trước."
+
+    return f"Hiện tại đang ở {plan[0].lower()}"
+
+
 def init_app_state(st):
     defaults = {
         "mode": "child",
@@ -234,6 +333,7 @@ def build_initial_context(problem_text: str, mode: str, support_level: str) -> s
     first_response_guide = get_first_response_guide()
     complexity = detect_problem_complexity(problem_text)
     frame = _infer_teaching_frame(problem_text)
+    step_plan = _build_step_plan(problem_text, frame)
 
     context = f"""
 {system_prompt}
@@ -253,33 +353,24 @@ Khung tư duy gợi ý cho bài này:
 - Kiến thức dùng phù hợp: {frame["knowledge"]}
 - Cách nghĩ nhanh: {frame["thinking"]}
 
+Kế hoạch bước giải gợi ý:
+{chr(10).join(f"- {step}" for step in step_plan)}
+
 Yêu cầu rất quan trọng:
 - Đây là phản hồi đầu tiên sau khi đã có đề bài.
 - Nếu mode là child:
-  - Nếu bài easy:
-    - mở đầu rất ngắn
-    - vào thẳng bài, không cần chào xã giao dài
-    - vẫn nên cho con thấy "khung tư duy mini":
-      - Dạng bài
-      - Kiến thức dùng
-      - Cách nghĩ nhanh
-  - Nếu bài medium_or_hard:
-    - phải nêu rõ:
-      - Dạng bài
-      - Kiến thức dùng
-      - Cách nghĩ nhanh
-  - ưu tiên cấu trúc:
+  - Ưu tiên mở đầu gọn, vào thẳng ý chính.
+  - Có thể bỏ hoàn toàn câu chào nếu đã có khung tư duy rõ.
+  - Ưu tiên cấu trúc:
     - Dạng bài: ...
     - Kiến thức dùng: ...
     - Cách nghĩ nhanh: ...
     - rồi kết thúc bằng đúng 1 câu hỏi để con làm bước đầu tiên
-  - tối đa 3 dòng ngắn + 1 câu hỏi
-  - không giảng dài dòng
-  - không mở đầu cụt ngủn chỉ bằng một câu hỏi
-  - không lặp lại kiểu chào xã giao dài như:
-    - "Thầy chào con!"
-    - "Thầy trò mình cùng làm bài này nhé!"
-
+  - tối đa 4 dòng ngắn + 1 câu hỏi
+  - không viết thêm các câu xã giao như:
+    - "Chào con"
+    - "Thầy trò mình cùng xem nhé"
+    - "Đây là dạng bài rất hay gặp"
 - Nếu mode là parent:
   - luôn ưu tiên trả lời theo kiểu TOÀN BÀI
   - phải nêu rõ:
@@ -291,26 +382,9 @@ Yêu cầu rất quan trọng:
   - nếu phù hợp có thể thêm:
     - Lời giải mẫu ngắn
   - không được hỏi phụ huynh từng bước như mode trẻ
-  - nên cố gắng giải thích gọn trong một lượt
 
-- "Kiến thức dùng" phải nói đúng bản chất toán học đang dùng, ví dụ:
-  - phép cộng
-  - phép trừ
-  - phép nhân rồi phép trừ
-  - đổi đơn vị rồi trừ
-  - chia đều nên dùng phép chia
-  - rút về đơn vị: chia rồi nhân
-  - chu vi hình vuông: cạnh nhân 4
-
-- Không được nói mơ hồ kiểu:
-  - "Cốt lõi là tìm số còn lại"
-  - "Cốt lõi là tìm đáp án"
-
-- "Cách nghĩ nhanh" hoặc "Hướng làm" phải nói ngắn gọn bước đi, ví dụ:
-  - tính số đã mua trước, rồi lấy số cần có trừ số đã mua
-  - đổi về cùng đơn vị trước, rồi làm phép trừ
-  - tìm 1 phần trước, rồi tìm nhiều phần
-
+- "Kiến thức dùng" phải nói đúng bản chất toán học đang dùng.
+- "Cách nghĩ nhanh" hoặc "Hướng làm" phải nói ngắn gọn bước đi.
 - Không giải hộ ngay trừ khi support_level là 'cach_giai'
 - Nếu bài có dấu hiệu khác đơn vị, phải nhắc chú ý đổi về cùng đơn vị
 """
@@ -451,15 +525,36 @@ def update_stuck_ui(st, reply_type: str):
 
 def detect_finished_response(response_text: str) -> bool:
     text = response_text.lower()
-    finish_signals = [
+
+    direct_finish_signals = [
+        "đáp số",
+        "đáp án đầy đủ là",
+        "vậy đáp án đầy đủ là",
+        "vậy là con đã giải xong",
+        "vậy là mình đã giải xong",
+        "con đã giải xong bài này rồi",
+        "con đã hoàn thành bài này rồi",
         "đã hoàn thành bài toán này",
         "đã làm xong bài này",
-        "đáp số",
-        "vậy mình sẽ nói là",
-        "con giỏi lắm! con đã hoàn thành",
-        "con đã hoàn thành bài này rồi"
     ]
-    return any(s in text for s in finish_signals)
+    if any(s in text for s in direct_finish_signals):
+        return True
+
+    if "kiến thức cần nhớ:" in text and any(
+        s in text for s in [
+            "đáp án",
+            "đáp số",
+            "vậy là con đã giải xong",
+            "vậy là mình đã giải xong",
+            "con làm rất tốt",
+            "chính xác",
+            "đúng rồi",
+            "kết quả là",
+        ]
+    ):
+        return True
+
+    return False
 
 
 def build_followup_context(
@@ -480,6 +575,8 @@ def build_followup_context(
     system_prompt = get_system_prompt(mode)
     support_guide = get_support_guide(support_level)
     frame = _infer_teaching_frame(problem_text)
+    step_plan = _build_step_plan(problem_text, frame)
+    current_step_hint = _infer_current_step_hint(problem_text, chat_history)
 
     history_text = ""
     for msg in chat_history[-6:]:
@@ -501,11 +598,9 @@ def build_followup_context(
 - Nếu học sinh đã ra đúng kết quả số hoặc gần đúng ý chính:
   - công nhận điều đúng trước
   - nhắc lỗi nhỏ ngắn gọn
-  - có thể tự chốt câu trả lời đầy đủ
-  - không giữ học sinh quá lâu
-- Nếu học sinh chỉ thiếu đơn vị hoặc thiếu câu trả lời đầy đủ:
-  - chỉ nhắc thêm đúng 1 ý còn thiếu
-  - ưu tiên chốt trong tối đa 1 lượt tiếp theo
+  - nếu chỉ thiếu đơn vị/câu trả lời thì chỉ nhắc tối đa 1 lần
+  - sau đó có thể tự chốt câu trả lời đầy đủ
+- Không giữ học sinh quá lâu ở phần trình bày hình thức.
 """
     else:
         error_rule = """
@@ -538,7 +633,7 @@ def build_followup_context(
     finish_rule = (
         "Bài đã hoàn tất. Không hỏi hỗ trợ thêm. Chỉ chốt ngắn gọn nếu cần."
         if is_finished
-        else "Nếu bài vừa hoàn tất, hãy chốt đáp án đầy đủ và chốt 1-2 ý kiến thức cần nhớ."
+        else "Nếu bài vừa hoàn tất, hãy chốt đáp án đầy đủ và chốt 1 dòng kiến thức cần nhớ."
     )
 
     mode_rule = f"""
@@ -547,22 +642,29 @@ def build_followup_context(
   - Kiến thức dùng: {frame["knowledge"]}
   - Cách nghĩ nhanh: {frame["thinking"]}
 
+- Kế hoạch bước giải gợi ý:
+{chr(10).join(f"  - {step}" for step in step_plan)}
+
+- Gợi ý bước hiện tại:
+  - {current_step_hint}
+
 - Nếu mode là child:
   - tối đa 2 câu ngắn + 1 câu hỏi
   - tránh lặp lại nguyên dữ kiện dài dòng
-  - dạy theo từng bước
-  - không chỉ dắt thao tác; phải cho con thấy mình đang làm bài theo dạng gì và dùng kiến thức gì
-  - nếu con đang bí, ưu tiên nhắc lại "Cách nghĩ nhanh" thật ngắn trước khi hỏi tiếp
+  - không chỉ dắt thao tác; phải cho con thấy mình đang ở bước nào
+  - nếu con đang bí, câu đầu tiên ưu tiên nhắc ngắn:
+    - đang ở bước nào
+    - bước này để làm gì
+  - sau đó mới hỏi tiếp hoặc cho phép tính
   - nếu đã biết rõ bước hiện tại, ưu tiên hỏi thẳng phép tính hoặc kết quả của bước đó; tránh hỏi lại quá chung chung kiểu "dùng phép tính gì?" nhiều lần
-  - tránh mở đầu lặp lại y hệt nhiều lượt như:
-    - "Thầy hiểu rồi."
-    - "Không sao con."
-    - "Thầy chào con!"
+  - tránh mở đầu lặp lại các câu như:
+    - "Chào con"
+    - "Không sao đâu con"
+    - "À, thầy hiểu rồi"
   - nếu cần động viên, chỉ dùng 1 cụm rất ngắn rồi vào ngay việc chính
   - nếu học sinh đã có đúng kết quả số nhưng thiếu đơn vị hoặc thiếu câu đầy đủ:
     - chỉ nhắc thêm 1 ý còn thiếu
-    - sau đó chốt luôn khi con bổ sung đúng
-    - không kéo dài thêm nhiều câu hỏi nhỏ
+    - sau đó chốt luôn khi con chưa bổ sung đúng ở lượt kế tiếp
   - khi phù hợp, có thể nhắc rất ngắn theo mẫu:
     - Dạng bài: ...
     - Kiến thức dùng: ...
@@ -618,7 +720,7 @@ Luật rất quan trọng:
   - child:
     - tăng hỗ trợ theo stuck_count
     - ưu tiên nhắc lại kiến thức đang dùng hoặc cách nghĩ nhanh trước
-    - stuck_count = 1: nhắc rất ngắn cách nghĩ nhanh rồi hỏi lại đúng bước hiện tại
+    - stuck_count = 1: nhắc rất ngắn bước hiện tại rồi hỏi lại đúng bước đó
     - stuck_count = 2: nói rõ hơn đang ở bước nào và cần làm phép tính gì
     - stuck_count >= 3: nói thẳng phép tính hoặc bước cần làm
   - parent:
@@ -631,7 +733,7 @@ Luật rất quan trọng:
 - Nếu học sinh đã có kết quả đúng nhưng thiếu đơn vị/câu đầy đủ:
   - nói rõ là kết quả đúng rồi
   - nhắc thêm phần còn thiếu
-  - rồi có thể tự chốt câu trả lời đầy đủ
+  - nếu vẫn chưa bổ sung đúng ở lượt kế tiếp, tự chốt luôn câu trả lời đầy đủ
 - Nếu học sinh trả lời các mảnh đúng như:
   - từ khóa ngắn
   - phép tính
