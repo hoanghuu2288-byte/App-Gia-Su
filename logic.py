@@ -84,6 +84,13 @@ def _infer_teaching_frame(problem_text: str) -> dict:
             "thinking": "Đưa các số đo về cùng một đơn vị trước rồi mới tính",
         }
 
+    if "o trong" in text or "->" in problem_text or "→" in problem_text:
+        return {
+            "problem_type": "Chuỗi thao tác",
+            "knowledge": "Làm lần lượt từng phép tính theo thứ tự",
+            "thinking": "Tính ô trước rồi mới dùng kết quả để tính ô sau",
+        }
+
     if "gap" in text and ("roi" in text or "sau do" in text or "tang" in text or "bot" in text or "tang ban" in text):
         return {
             "problem_type": "Bài nhiều bước",
@@ -98,8 +105,9 @@ def _infer_teaching_frame(problem_text: str) -> dict:
             "thinking": "Lấy số đã cho nhân với số lần",
         }
 
-    if ("moi lan" in text or "3 lan" in text or "2 lan" in text or "4 lan" in text) and (
-        "con lai" in text or "con phai" in text or "sau khi" in text or "da ban" in text
+    if (
+        ("moi lan" in text or "moi chong" in text or "moi gio" in text or "3 lan" in text or "2 lan" in text or "4 lan" in text)
+        and ("ban" in text or "con lai" in text or "con phai" in text or "sau khi" in text)
     ):
         return {
             "problem_type": "Bài nhiều bước",
@@ -119,13 +127,6 @@ def _infer_teaching_frame(problem_text: str) -> dict:
             "problem_type": "Tìm thành phần chưa biết",
             "knowledge": "Tìm số bị chia khi biết thương và số chia",
             "thinking": "Muốn tìm số bị chia thì lấy thương nhân số chia",
-        }
-
-    if "o trong" in text or "->" in problem_text or "→" in problem_text:
-        return {
-            "problem_type": "Chuỗi thao tác",
-            "knowledge": "Làm lần lượt từng phép tính theo thứ tự",
-            "thinking": "Tính ô trước rồi mới dùng kết quả để tính ô sau",
         }
 
     return {
@@ -361,7 +362,6 @@ def classify_user_reply(user_input: str) -> str:
         "chua biet nua",
         "chua hieu",
         "khong biey",
-        "khong biet",
     ]
 
     if normalized in exact_dont_know or compact in exact_dont_know:
@@ -396,7 +396,7 @@ def is_small_error(user_input: str) -> bool:
     text = user_input.strip().lower()
 
     has_number = any(ch.isdigit() for ch in text)
-    has_equal = "=" in text or "x" in text or ":" in text or "-" in text or "+" in text
+    has_equal = "=" in text
     has_unit = any(
         unit in text for unit in [
             "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
@@ -404,10 +404,7 @@ def is_small_error(user_input: str) -> bool:
         ]
     )
 
-    if has_number and not has_unit:
-        return True
-
-    if has_number and has_equal and not has_unit:
+    if has_number and not has_equal and not has_unit:
         return True
 
     return False
@@ -556,6 +553,7 @@ def build_followup_context(
   - dạy theo từng bước
   - không chỉ dắt thao tác; phải cho con thấy mình đang làm bài theo dạng gì và dùng kiến thức gì
   - nếu con đang bí, ưu tiên nhắc lại "Cách nghĩ nhanh" thật ngắn trước khi hỏi tiếp
+  - nếu đã biết rõ bước hiện tại, ưu tiên hỏi thẳng phép tính hoặc kết quả của bước đó; tránh hỏi lại quá chung chung kiểu "dùng phép tính gì?" nhiều lần
   - tránh mở đầu lặp lại y hệt nhiều lượt như:
     - "Thầy hiểu rồi."
     - "Không sao con."
@@ -620,6 +618,9 @@ Luật rất quan trọng:
   - child:
     - tăng hỗ trợ theo stuck_count
     - ưu tiên nhắc lại kiến thức đang dùng hoặc cách nghĩ nhanh trước
+    - stuck_count = 1: nhắc rất ngắn cách nghĩ nhanh rồi hỏi lại đúng bước hiện tại
+    - stuck_count = 2: nói rõ hơn đang ở bước nào và cần làm phép tính gì
+    - stuck_count >= 3: nói thẳng phép tính hoặc bước cần làm
   - parent:
     - gom lại và giải thích toàn bài ngắn gọn hơn
 - Nếu reply_type là student_asks_answer mà chưa được phép giải đầy đủ:
