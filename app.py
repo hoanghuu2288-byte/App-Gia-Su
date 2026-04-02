@@ -31,6 +31,123 @@ st.set_page_config(
 
 init_app_state(st)
 
+
+def reset_learning_flow():
+    st.session_state.chat_history = []
+    st.session_state.summary = ""
+    st.session_state.presentation_retry_count = 0
+    st.session_state.stuck_count = 0
+    st.session_state.show_help_buttons = False
+    st.session_state.show_hint_button = False
+    st.session_state.show_solution_button = False
+    st.session_state.is_finished = False
+    st.session_state.current_step = "start"
+    st.session_state.last_error_type = ""
+
+
+def start_problem_session():
+    reset_learning_flow()
+
+    initial_context = build_initial_context(
+        problem_text=st.session_state.problem_text,
+        mode=st.session_state.mode,
+        support_level=st.session_state.support_level
+    )
+
+    response = generate_text_response(
+        system_prompt=get_system_prompt(st.session_state.mode),
+        user_input=initial_context
+    )
+
+    st.session_state.is_finished = detect_finished_response(response)
+
+    st.session_state.chat_history.append({
+        "role": "assistant",
+        "content": response
+    })
+
+
+def run_followup_turn(
+    user_reply: str,
+    *,
+    reply_type_override: str | None = None,
+    support_level_override: str | None = None,
+    allow_full_solution_override: bool | None = None,
+    append_user_message: bool = True,
+):
+    if append_user_message:
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": user_reply
+        })
+
+    reply_type = reply_type_override or classify_user_reply(user_reply)
+
+    update_step_and_error(st, reply_type)
+    update_stuck_ui(st, reply_type)
+
+    if reply_type_override == "student_dont_know":
+        require_full_presentation = False
+        small_error = False
+    else:
+        require_full_presentation = should_require_full_presentation(st, user_reply)
+        small_error = is_small_error(user_reply)
+
+    update_presentation_retry(st, require_full_presentation)
+
+    support_level_for_response = support_level_override or st.session_state.support_level
+    allow_full_solution_for_response = (
+        st.session_state.allow_full_solution
+        if allow_full_solution_override is None
+        else allow_full_solution_override
+    )
+
+    followup_context = build_followup_context(
+        problem_text=st.session_state.problem_text,
+        mode=st.session_state.mode,
+        support_level=support_level_for_response,
+        chat_history=st.session_state.chat_history,
+        current_step=st.session_state.current_step,
+        last_error_type=st.session_state.last_error_type,
+        user_input=user_reply,
+        reply_type=reply_type,
+        allow_full_solution=allow_full_solution_for_response,
+        require_full_presentation=require_full_presentation,
+        small_error=small_error,
+        stuck_count=st.session_state.stuck_count,
+        is_finished=st.session_state.is_finished,
+    )
+
+    response = generate_text_response(
+        system_prompt=get_system_prompt(st.session_state.mode),
+        user_input=followup_context
+    )
+
+    st.session_state.is_finished = detect_finished_response(response)
+    if st.session_state.is_finished:
+        st.session_state.show_help_buttons = False
+        st.session_state.show_hint_button = False
+        st.session_state.show_solution_button = False
+
+    st.session_state.chat_history.append({
+        "role": "assistant",
+        "content": response
+    })
+
+
+def get_child_help_response_settings():
+    if st.session_state.support_level == "cach_giai":
+        return "cach_giai", True
+
+    if st.session_state.stuck_count >= 4:
+        return "cach_giai", True
+
+    if st.session_state.support_level == "tung_buoc" or st.session_state.stuck_count >= 2:
+        return "tung_buoc", False
+
+    return "goi_y", False
+
+
 # =========================
 # 1. CỔNG MỞ KHÓA ĐƠN GIẢN
 # =========================
@@ -109,32 +226,7 @@ else:
             if typed_problem.strip():
                 st.session_state.problem_text = typed_problem.strip()
                 st.session_state.problem_confirmed = True
-                st.session_state.chat_history = []
-                st.session_state.summary = ""
-                st.session_state.presentation_retry_count = 0
-                st.session_state.stuck_count = 0
-                st.session_state.show_help_buttons = False
-                st.session_state.show_hint_button = False
-                st.session_state.show_solution_button = False
-                st.session_state.is_finished = False
-
-                initial_context = build_initial_context(
-                    problem_text=st.session_state.problem_text,
-                    mode=st.session_state.mode,
-                    support_level=st.session_state.support_level
-                )
-
-                response = generate_text_response(
-                    system_prompt=get_system_prompt(st.session_state.mode),
-                    user_input=initial_context
-                )
-
-                st.session_state.is_finished = detect_finished_response(response)
-
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": response
-                })
+                start_problem_session()
                 st.rerun()
 
             elif uploaded_file is not None:
@@ -187,32 +279,7 @@ Không giải thích thêm.
             if st.button("Đúng rồi ✅"):
                 st.session_state.problem_text = st.session_state.confirm_problem_text
                 st.session_state.problem_confirmed = True
-                st.session_state.chat_history = []
-                st.session_state.summary = ""
-                st.session_state.presentation_retry_count = 0
-                st.session_state.stuck_count = 0
-                st.session_state.show_help_buttons = False
-                st.session_state.show_hint_button = False
-                st.session_state.show_solution_button = False
-                st.session_state.is_finished = False
-
-                initial_context = build_initial_context(
-                    problem_text=st.session_state.problem_text,
-                    mode=st.session_state.mode,
-                    support_level=st.session_state.support_level
-                )
-
-                response = generate_text_response(
-                    system_prompt=get_system_prompt(st.session_state.mode),
-                    user_input=initial_context
-                )
-
-                st.session_state.is_finished = detect_finished_response(response)
-
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": response
-                })
+                start_problem_session()
                 st.rerun()
 
         with col_d:
@@ -230,73 +297,25 @@ Không giải thích thêm.
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        # --------- 1 NÚT HỖ TRỢ CHÍNH CHO MODE TRẺ ----------
+        # --------- 1 NÚT HỖ TRỢ CHÍNH CHO MODE TRẺ: HIỆN NGAY TỪ LƯỢT ĐẦU ----------
         if (
             st.session_state.mode == "child"
-            and st.session_state.show_help_buttons
             and not st.session_state.is_finished
+            and len(st.session_state.chat_history) > 0
         ):
             st.markdown("**Hỗ trợ thêm:**")
+            st.caption('Con bí thì bấm **Gợi ý thêm**, không cần gõ "không biết".')
 
-            if st.button("Gợi ý thêm"):
-                user_reply = "con cần gợi ý thêm"
-                st.session_state.chat_history.append({
-                    "role": "user",
-                    "content": user_reply
-                })
+            if st.button("Gợi ý thêm", key="child_help_button"):
+                support_level_for_response, allow_full_solution_for_response = get_child_help_response_settings()
 
-                reply_type = "student_dont_know"
-                update_step_and_error(st, reply_type)
-                update_stuck_ui(st, reply_type)
-
-                if st.session_state.support_level == "cach_giai":
-                    support_level_for_response = "cach_giai"
-                    allow_full_solution_for_response = True
-                elif st.session_state.stuck_count >= 4:
-                    support_level_for_response = "cach_giai"
-                    allow_full_solution_for_response = True
-                elif st.session_state.support_level == "tung_buoc" or st.session_state.stuck_count >= 2:
-                    support_level_for_response = "tung_buoc"
-                    allow_full_solution_for_response = False
-                else:
-                    support_level_for_response = "goi_y"
-                    allow_full_solution_for_response = False
-
-                require_full_presentation = False
-                update_presentation_retry(st, require_full_presentation)
-                small_error = False
-
-                followup_context = build_followup_context(
-                    problem_text=st.session_state.problem_text,
-                    mode=st.session_state.mode,
-                    support_level=support_level_for_response,
-                    chat_history=st.session_state.chat_history,
-                    current_step=st.session_state.current_step,
-                    last_error_type=st.session_state.last_error_type,
-                    user_input=user_reply,
-                    reply_type=reply_type,
-                    allow_full_solution=allow_full_solution_for_response,
-                    require_full_presentation=require_full_presentation,
-                    small_error=small_error,
-                    stuck_count=st.session_state.stuck_count,
-                    is_finished=st.session_state.is_finished,
+                run_followup_turn(
+                    user_reply="con cần gợi ý thêm",
+                    reply_type_override="student_dont_know",
+                    support_level_override=support_level_for_response,
+                    allow_full_solution_override=allow_full_solution_for_response,
+                    append_user_message=False,
                 )
-
-                response = generate_text_response(
-                    system_prompt=get_system_prompt(st.session_state.mode),
-                    user_input=followup_context
-                )
-
-                st.session_state.is_finished = detect_finished_response(response)
-                if st.session_state.is_finished:
-                    st.session_state.show_help_buttons = False
-                    st.session_state.show_hint_button = False
-                    st.session_state.show_solution_button = False
-
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": response
-                })
                 st.rerun()
 
         placeholder_text = (
@@ -308,75 +327,13 @@ Không giải thích thêm.
         user_reply = st.chat_input(placeholder_text)
 
         if user_reply:
-            st.session_state.chat_history.append({
-                "role": "user",
-                "content": user_reply
-            })
-
             if looks_like_new_problem(user_reply):
                 start_new_problem(st, user_reply)
-
-                initial_context = build_initial_context(
-                    problem_text=st.session_state.problem_text,
-                    mode=st.session_state.mode,
-                    support_level=st.session_state.support_level
-                )
-
-                response = generate_text_response(
-                    system_prompt=get_system_prompt(st.session_state.mode),
-                    user_input=initial_context
-                )
-
-                st.session_state.is_finished = detect_finished_response(response)
-
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": response
-                })
-
+                start_problem_session()
                 st.rerun()
 
-            reply_type = classify_user_reply(user_reply)
-            update_step_and_error(st, reply_type)
-            update_stuck_ui(st, reply_type)
-
-            require_full_presentation = should_require_full_presentation(st, user_reply)
-            update_presentation_retry(st, require_full_presentation)
-            small_error = is_small_error(user_reply)
-
-            followup_context = build_followup_context(
-                problem_text=st.session_state.problem_text,
-                mode=st.session_state.mode,
-                support_level=st.session_state.support_level,
-                chat_history=st.session_state.chat_history,
-                current_step=st.session_state.current_step,
-                last_error_type=st.session_state.last_error_type,
-                user_input=user_reply,
-                reply_type=reply_type,
-                allow_full_solution=st.session_state.allow_full_solution,
-                require_full_presentation=require_full_presentation,
-                small_error=small_error,
-                stuck_count=st.session_state.stuck_count,
-                is_finished=st.session_state.is_finished,
-            )
-
             try:
-                response = generate_text_response(
-                    system_prompt=get_system_prompt(st.session_state.mode),
-                    user_input=followup_context
-                )
-
-                st.session_state.is_finished = detect_finished_response(response)
-                if st.session_state.is_finished:
-                    st.session_state.show_help_buttons = False
-                    st.session_state.show_hint_button = False
-                    st.session_state.show_solution_button = False
-
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": response
-                })
-
+                run_followup_turn(user_reply=user_reply)
                 st.rerun()
 
             except Exception as e:
