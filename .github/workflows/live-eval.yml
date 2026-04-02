@@ -22,13 +22,22 @@ jobs:
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
       - name: Run live eval with Gemini
+        id: live_eval
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python scripts/run_live_eval.py
+        continue-on-error: true
 
       - name: Upload eval reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: live-eval-reports
           path: eval_reports/
+
+      - name: Fail workflow if eval failed
+        if: steps.live_eval.outcome == 'failure'
+        run: |
+          echo "Live eval có case fail. Xem artifact để biết chi tiết."
+          exit 1
