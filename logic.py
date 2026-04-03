@@ -101,10 +101,118 @@ def responses_too_similar(previous_text: str, current_text: str) -> bool:
 
     shorter = min(len(prev), len(curr))
     longer = max(len(prev), len(curr))
-    if shorter > 0 and (prev in curr or curr in prev) and shorter / longer >= 0.75:
+    if shorter > 0 and (prev in curr or curr in prev) and shorter / longer >= 0.72:
         return True
 
-    return SequenceMatcher(None, prev, curr).ratio() >= 0.88
+    prev_lines = [line.strip() for line in prev.split() if line.strip()]
+    curr_lines = [line.strip() for line in curr.split() if line.strip()]
+    if prev_lines[:12] == curr_lines[:12] and len(prev_lines[:12]) >= 6:
+        return True
+
+    prev_tokens = set(prev.split())
+    curr_tokens = set(curr.split())
+    overlap_base = max(1, min(len(prev_tokens), len(curr_tokens)))
+    token_overlap = len(prev_tokens & curr_tokens) / overlap_base
+    if token_overlap >= 0.85:
+        return True
+
+    return SequenceMatcher(None, prev, curr).ratio() >= 0.84
+
+
+UNIT_HINT_KEYWORDS = [
+    "bao",
+    "cm",
+    "kg",
+    "g",
+    "quyen",
+    "quyển",
+    "chai",
+    "khay",
+    "met",
+    "mét",
+    "vien",
+    "viên",
+    "gach",
+    "gạch",
+    "but",
+    "bút",
+    "hoa",
+    "qua",
+    "quả",
+    "cai",
+    "cái",
+    "vuon hoa",
+    "vườn hoa",
+]
+
+
+ACTION_REPLY_SIGNALS = [
+    "?",
+    "con tinh",
+    "con thu",
+    "con viet",
+    "con chon",
+    "con chọn",
+    "con giup",
+    "con giúp",
+    "giup thay",
+    "giúp thầy",
+    "lam giup",
+    "làm giúp",
+    "hay tinh",
+    "hãy tính",
+    "thu tinh",
+    "thử tính",
+    "thu viet",
+    "thử viết",
+]
+
+
+FINAL_ANSWER_SIGNALS = [
+    "dap so",
+    "đáp số",
+    "dap an day du la",
+    "đáp án đầy đủ là",
+    "vay la con da giai xong",
+    "vậy là con đã giải xong",
+    "con da giai xong bai nay roi",
+    "con đã giải xong bài này rồi",
+    "con da hoan thanh bai nay roi",
+    "con đã hoàn thành bài này rồi",
+    "da hoan thanh bai toan nay",
+    "đã hoàn thành bài toán này",
+    "da lam xong bai nay",
+    "đã làm xong bài này",
+    "kien thuc can nho",
+    "kiến thức cần nhớ",
+]
+
+
+FINAL_ANSWER_VERBS = [
+    "con phai mua",
+    "còn phải mua",
+    "con lai",
+    "còn lại",
+    "dap an la",
+    "đáp án là",
+    "ket qua la",
+    "kết quả là",
+    "la vuon hoa",
+    "là vườn hoa",
+]
+
+
+QUESTIONLESS_WRAPUP_SIGNALS = [
+    "viet cau tra loi day du",
+    "viết câu trả lời đầy đủ",
+    "chi can viet",
+    "chỉ cần viết",
+    "con viet giup thay",
+    "con viết giúp thầy",
+]
+
+
+NORMALIZED_UNIT_HINT_KEYWORDS = [_normalize_for_matching(u) for u in UNIT_HINT_KEYWORDS]
 
 
 def _infer_teaching_frame(problem_text: str) -> dict:
@@ -585,12 +693,7 @@ def is_small_error(user_input: str) -> bool:
 
     has_number = any(ch.isdigit() for ch in text)
     has_equal = "=" in text
-    has_unit = any(
-        unit in text for unit in [
-            "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
-            "xi măng", "quả", "cái", "m", "viên", "gạch", "bút", "hoa",
-        ]
-    )
+    has_unit = any(unit in text for unit in UNIT_HINT_KEYWORDS)
 
     if has_number and not has_equal and not has_unit:
         return True
@@ -605,12 +708,7 @@ def should_require_full_presentation(st, user_input: str) -> bool:
     text = user_input.strip().lower()
 
     has_equal = "=" in text
-    has_unit = any(
-        unit in text for unit in [
-            "bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét",
-            "xi măng", "quả", "cái", "m", "viên", "gạch", "bút", "hoa",
-        ]
-    )
+    has_unit = any(unit in text for unit in UNIT_HINT_KEYWORDS)
 
     if has_equal or has_unit:
         return False
@@ -640,7 +738,60 @@ def update_stuck_ui(st, reply_type: str):
     )
 
 
+def _normalize_response_text(response_text: str) -> str:
+    return _normalize_for_matching(response_text)
+
+
+def _assistant_is_still_asking(response_text: str) -> bool:
+    normalized = _normalize_response_text(response_text)
+    return any(signal in normalized or signal in response_text for signal in ACTION_REPLY_SIGNALS)
+
+
+def _looks_like_final_answer_block(response_text: str) -> bool:
+    normalized = _normalize_response_text(response_text)
+    has_number = any(ch.isdigit() for ch in response_text)
+    has_unit = any(unit in normalized for unit in NORMALIZED_UNIT_HINT_KEYWORDS)
+    has_final_signal = any(signal in normalized or signal in response_text for signal in FINAL_ANSWER_SIGNALS)
+    has_final_verb = any(signal in normalized or signal in response_text for signal in FINAL_ANSWER_VERBS)
+
+    if has_final_signal and not _assistant_is_still_asking(response_text):
+        return True
+
+    if has_number and has_unit and has_final_verb and not _assistant_is_still_asking(response_text):
+        return True
+
+    if (
+        "kien thuc can nho" in normalized
+        and has_number
+        and not _assistant_is_still_asking(response_text)
+    ):
+        return True
+
+    return False
+
+
+def should_mark_finished_after_child_help(response_text: str, hint_request_count: int) -> bool:
+    if detect_finished_response(response_text):
+        return True
+
+    normalized = _normalize_response_text(response_text)
+    has_number = any(ch.isdigit() for ch in response_text)
+    has_unit = any(unit in normalized for unit in NORMALIZED_UNIT_HINT_KEYWORDS)
+    has_wrapup_signal = any(signal in normalized or signal in response_text for signal in QUESTIONLESS_WRAPUP_SIGNALS)
+
+    if hint_request_count >= 3 and has_number and not _assistant_is_still_asking(response_text):
+        return True
+
+    if hint_request_count >= 2 and has_number and has_unit and has_wrapup_signal:
+        return True
+
+    return False
+
+
 def detect_finished_response(response_text: str) -> bool:
+    if not response_text or not response_text.strip():
+        return False
+
     text = response_text.lower()
 
     direct_finish_signals = [
@@ -657,18 +808,7 @@ def detect_finished_response(response_text: str) -> bool:
     if any(s in text for s in direct_finish_signals):
         return True
 
-    if "kiến thức cần nhớ:" in text and any(
-        s in text for s in [
-            "đáp án",
-            "đáp số",
-            "vậy là con đã giải xong",
-            "vậy là mình đã giải xong",
-            "con làm rất tốt",
-            "chính xác",
-            "đúng rồi",
-            "kết quả là",
-        ]
-    ):
+    if _looks_like_final_answer_block(response_text):
         return True
 
     return False
