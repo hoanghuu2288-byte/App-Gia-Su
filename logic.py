@@ -2,6 +2,7 @@
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 
 from prompts import (
     get_system_prompt,
@@ -12,6 +13,7 @@ from prompts import (
 
 
 def _strip_accents(text: str) -> str:
+    text = text.replace("đ", "d").replace("Đ", "D")
     normalized = unicodedata.normalize("NFD", text)
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
 
@@ -21,6 +23,88 @@ def _normalize_for_matching(text: str) -> str:
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _extract_choice_letter(user_input: str) -> str | None:
+    if not user_input or not user_input.strip():
+        return None
+
+    raw = user_input.strip()
+    normalized = _normalize_for_matching(raw)
+    if not normalized:
+        return None
+
+    compact = re.sub(r"[^a-z0-9]", "", normalized)
+    exact_map = {
+        "a": "A",
+        "b": "B",
+        "c": "C",
+        "d": "D",
+        "da": "D",
+        "adapan": None,
+    }
+    if compact in exact_map and exact_map[compact] is not None:
+        return exact_map[compact]
+
+    tokens = normalized.split()
+    if len(tokens) >= 2:
+        last_token = tokens[-1]
+        prefix_patterns = [
+            ["chon"],
+            ["dap", "an"],
+            ["la"],
+            ["la", "dap", "an"],
+            ["con", "chon"],
+            ["con", "nghi", "la"],
+            ["con", "chọn"],
+        ]
+        if last_token in {"a", "b", "c", "d"}:
+            for prefix in prefix_patterns:
+                if tokens[-(len(prefix) + 1):-1] == prefix:
+                    return last_token.upper()
+
+    match = re.fullmatch(r"\(?\[?\{?\s*([a-dA-D])\s*[\)\]\}\.\:]?", raw)
+    if match:
+        return match.group(1).upper()
+
+    match = re.fullmatch(r"(?:dap\s*an|chon|la|con\s*chon)\s*[:\-]?\s*([a-d])", normalized)
+    if match:
+        return match.group(1).upper()
+
+    return None
+
+
+def normalize_user_input(user_input: str) -> str:
+    text = (user_input or "").strip()
+    if not text:
+        return ""
+
+    choice_letter = _extract_choice_letter(text)
+    if choice_letter:
+        return f"Chọn đáp án {choice_letter}"
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def responses_too_similar(previous_text: str, current_text: str) -> bool:
+    if not previous_text or not current_text:
+        return False
+
+    prev = _normalize_for_matching(previous_text)
+    curr = _normalize_for_matching(current_text)
+
+    if not prev or not curr:
+        return False
+
+    if prev == curr:
+        return True
+
+    shorter = min(len(prev), len(curr))
+    longer = max(len(prev), len(curr))
+    if shorter > 0 and (prev in curr or curr in prev) and shorter / longer >= 0.75:
+        return True
+
+    return SequenceMatcher(None, prev, curr).ratio() >= 0.88
 
 
 def _infer_teaching_frame(problem_text: str) -> dict:
@@ -253,6 +337,9 @@ def init_app_state(st):
         "show_hint_button": False,
         "show_solution_button": False,
         "is_finished": False,
+        "hint_request_count": 0,
+        "last_real_user_reply": "",
+        "last_assistant_response": "",
     }
 
     for key, value in defaults.items():
@@ -276,6 +363,9 @@ def reset_session(st):
     st.session_state.show_hint_button = False
     st.session_state.show_solution_button = False
     st.session_state.is_finished = False
+    st.session_state.hint_request_count = 0
+    st.session_state.last_real_user_reply = ""
+    st.session_state.last_assistant_response = ""
 
 
 def looks_like_new_problem(user_input: str) -> bool:
@@ -308,6 +398,9 @@ def start_new_problem(st, new_problem_text: str):
     st.session_state.show_hint_button = False
     st.session_state.show_solution_button = False
     st.session_state.is_finished = False
+    st.session_state.hint_request_count = 0
+    st.session_state.last_real_user_reply = ""
+    st.session_state.last_assistant_response = ""
 
 
 def detect_problem_complexity(problem_text: str) -> str:
@@ -399,6 +492,9 @@ def classify_user_reply(user_input: str) -> str:
     normalized = _normalize_for_matching(raw_text)
     compact = normalized.replace(" ", "")
 
+    if _extract_choice_letter(raw_text):
+        return "normal_reply"
+
     exact_dont_know = {
         "khong",
         "ko",
@@ -482,6 +578,9 @@ def classify_user_reply(user_input: str) -> str:
 
 
 def is_small_error(user_input: str) -> bool:
+    if _extract_choice_letter(user_input):
+        return False
+
     text = user_input.strip().lower()
 
     has_number = any(ch.isdigit() for ch in text)
@@ -500,6 +599,9 @@ def is_small_error(user_input: str) -> bool:
 
 
 def should_require_full_presentation(st, user_input: str) -> bool:
+    if _extract_choice_letter(user_input):
+        return False
+
     text = user_input.strip().lower()
 
     has_equal = "=" in text
@@ -600,6 +702,21 @@ def build_followup_context(
         else:
             role = "Học sinh" if msg["role"] == "user" else "Thầy"
         history_text += f"- {role}: {msg['content']}\n"
+
+    normalized_user_input = _normalize_for_matching(user_input)
+    is_hint_request = "goi y them" in normalized_user_input or "can goi y" in normalized_user_input
+    hint_round_match = re.search(r"lan\s+(\d+)", normalized_user_input)
+    hint_round = int(hint_round_match.group(1)) if hint_round_match else 0
+
+    anti_repeat_rule = ""
+    if is_hint_request:
+        anti_repeat_rule = f"""
+- Đây là lượt bấm Gợi ý thêm{f" lần {hint_round}" if hint_round else ""}.
+- Không được lặp lại nguyên văn hoặc gần giống gợi ý ngay trước đó.
+- Phải tiến thêm ít nhất 1 nấc so với lượt trước.
+- Nếu đã gợi ý từ lần 2 trở lên, phải cụ thể hơn: nói rõ bước đang làm hoặc phép tính cần viết.
+- Nếu đã gợi ý từ lần 3 trở lên, không hỏi lại chung chung; nói thẳng bước hoặc phép tính cần làm.
+"""
 
     full_solution_rule = (
         "Được phép trình bày cách giải theo từng bước."
@@ -727,6 +844,7 @@ Luật rất quan trọng:
 {error_rule}
 {escalation_rule}
 {mode_rule}
+{anti_repeat_rule}
 - Nếu reply_type là student_number_only:
   - chỉ nhắc viết rõ hơn thật ngắn
   - không kéo dài nhiều lượt
