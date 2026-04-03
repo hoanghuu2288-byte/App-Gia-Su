@@ -9,12 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import List
 
-import google.generativeai as genai
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from eval_cases import EvalCase, TurnSpec, get_eval_cases
+from eval_cases import EvalCase, get_eval_cases
+from gemini_client import generate_text_response
 from prompts import get_system_prompt
 from logic import (
     build_initial_context,
@@ -59,20 +58,20 @@ class DummyStreamlit:
         )
 
 
-def configure_gemini_from_env():
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Thiếu GEMINI_API_KEY trong GitHub Secret.")
-    genai.configure(api_key=api_key)
-
-
 def call_model(system_prompt: str, user_input: str, model_name: str) -> str:
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_prompt,
+    return generate_text_response(
+        system_prompt=system_prompt,
+        user_input=user_input,
+        model=model_name,
     )
-    response = model.generate_content(user_input)
-    return getattr(response, "text", "") or ""
+
+
+def get_text_eval_model() -> str:
+    return (
+        os.getenv("LIVE_EVAL_TEXT_MODEL", "").strip()
+        or os.getenv("OPENAI_TEXT_MODEL", "").strip()
+        or "gpt-5.4-mini"
+    )
 
 
 def get_child_help_response_settings(st):
@@ -86,16 +85,6 @@ def get_child_help_response_settings(st):
         return "tung_buoc", False
 
     return "goi_y", False
-
-
-def has_all(text: str, items: List[str]):
-    missing = [item for item in items if item not in text]
-    return len(missing) == 0, missing
-
-
-def has_none(text: str, items: List[str]):
-    found = [item for item in items if item in text]
-    return len(found) == 0, found
 
 
 def score_block(label: str, text: str, must_have: List[str], must_not_have: List[str], failed_checks: List[str]):
@@ -360,38 +349,25 @@ def write_markdown(results: List[EvalResult], output_path: Path, model_name: str
 
 
 def main():
-    configure_gemini_from_env()
-
-    model_name = os.getenv("EVAL_MODEL_NAME", "gemini-2.5-pro")
+    model_name = get_text_eval_model()
     cases = get_eval_cases()
-    results = []
+    results = [run_case(case, model_name=model_name) for case in cases]
 
-    for idx, case in enumerate(cases, start=1):
-        print(f"[{idx}/{len(cases)}] Running {case.id} ...")
-        result = run_case(case, model_name=model_name)
-        results.append(result)
-        print(f"    -> {'PASS' if result.passed else 'FAIL'} ({result.score}/{result.max_score}, ratio={result.pass_ratio:.2f})")
-
-    outdir = Path("eval_reports")
+    out_dir = ROOT / "eval_reports"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = outdir / f"live_eval_v2_{timestamp}.csv"
-    md_path = outdir / f"live_eval_v2_{timestamp}.md"
+    csv_path = out_dir / f"live_eval_{timestamp}.csv"
+    md_path = out_dir / f"live_eval_{timestamp}.md"
 
     write_csv(results, csv_path)
     write_markdown(results, md_path, model_name=model_name)
 
-    passed = sum(1 for r in results if r.passed)
-    total = len(results)
+    failed = [r for r in results if not r.passed]
+    print(f"Live Eval xong: {len(cases) - len(failed)}/{len(cases)} PASS")
+    print(f"CSV: {csv_path}")
+    print(f"MD : {md_path}")
 
-    print()
-    print("=" * 60)
-    print(f"Done. Passed {passed}/{total}")
-    print(f"CSV report: {csv_path}")
-    print(f"MD  report: {md_path}")
-    print("=" * 60)
-
-    if passed < total:
-        raise SystemExit(1)
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
