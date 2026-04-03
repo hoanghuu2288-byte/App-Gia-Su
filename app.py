@@ -1,3 +1,6 @@
+import json
+import re
+
 import streamlit as st
 from PIL import Image
 
@@ -32,6 +35,356 @@ st.set_page_config(
 init_app_state(st)
 
 
+# =========================================================
+# IMAGE / OCR / STRUCTURED EXTRACTION HELPERS
+# =========================================================
+def ensure_image_state():
+    defaults = {
+        "image_raw_ocr_text": "",
+        "image_structured_data": {},
+        "image_question_text": "",
+        "image_data_text": "",
+        "image_options_text": "",
+        "image_missing_text": "",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def clear_image_state():
+    st.session_state.pending_image = None
+    st.session_state.image_raw_ocr_text = ""
+    st.session_state.image_structured_data = {}
+    st.session_state.image_question_text = ""
+    st.session_state.image_data_text = ""
+    st.session_state.image_options_text = ""
+    st.session_state.image_missing_text = ""
+
+
+ensure_image_state()
+
+
+OCR_ONLY_PROMPT = """
+Nhiệm vụ của bạn là OCR THUẦN cho ảnh đề toán.
+
+Luật bắt buộc:
+1. Chỉ chép lại đúng chữ, số, ký hiệu NHÌN THẤY TRONG ẢNH.
+2. Không được suy luận thêm nội dung không có trong ảnh.
+3. Không được tự thêm:
+   - câu hỏi
+   - đáp án A/B/C/D
+   - dữ kiện
+   - lời giải
+   - diễn giải
+4. Nếu ảnh chỉ có hình, sơ đồ, nhãn, số đo, thì chỉ trả về đúng các chữ và số nhìn thấy.
+5. Giữ nguyên line break hợp lý để dễ đọc.
+6. Nếu một phần chữ mờ hoặc không chắc, ghi [KHÔNG ĐỌC RÕ].
+7. Không giải bài.
+8. Không giải thích thêm.
+9. Không tóm tắt.
+10. Không viết câu mở đầu.
+
+Chỉ trả về phần OCR thô từ ảnh.
+"""
+
+
+def build_structured_extraction_prompt(raw_ocr_text: str) -> str:
+    return f"""
+Bạn đang làm nhiệm vụ TRÍCH XUẤT DỮ KIỆN TOÁN LỚP 3 TỪ ẢNH theo JSON có cấu trúc.
+
+Rất quan trọng:
+- Chỉ dùng những gì NHÌN THẤY trong ảnh.
+- Có thể tham khảo OCR thô bên dưới để đối chiếu.
+- Không được tự bịa thêm câu hỏi, đáp án, dữ kiện.
+- Nếu ảnh không có đủ câu hỏi thì để question_text rỗng.
+- Nếu ảnh không có lựa chọn A/B/C/D thì options phải là [].
+- Nếu chỗ nào không chắc, ghi vào missing_or_unclear.
+- Không giải bài.
+- Không mô tả lan man.
+- Chỉ trả về 1 JSON object hợp lệ, không thêm markdown, không thêm lời giải thích.
+
+Schema bắt buộc:
+{{
+  "image_type": "text_only | diagram | geometry | mixed | unknown",
+  "visible_text": ["..."],
+  "question_text": "...",
+  "options": ["A. ...", "B. ..."],
+  "diagram_entities": [
+    {{
+      "name": "...",
+      "value": "...",
+      "unit": "...",
+      "relation": "..."
+    }}
+  ],
+  "geometry_labels": [
+    {{
+      "object": "...",
+      "label": "...",
+      "value": "...",
+      "unit": "..."
+    }}
+  ],
+  "missing_or_unclear": ["..."],
+  "confidence": 0.0
+}}
+
+OCR thô để đối chiếu:
+{raw_ocr_text}
+"""
+
+
+def _clean_json_text(text: str) -> str:
+    text = text.strip()
+    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _extract_json_object(text: str):
+    cleaned = _clean_json_text(text)
+
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = cleaned[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    return None
+
+
+def _to_str_list(value):
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            if isinstance(item, str):
+                item = item.strip()
+                if item:
+                    out.append(item)
+            elif item is not None:
+                item = str(item).strip()
+                if item:
+                    out.append(item)
+        return out
+    return []
+
+
+def _normalize_options(options):
+    normalized = []
+    if not isinstance(options, list):
+        return normalized
+
+    for opt in options:
+        if isinstance(opt, str):
+            text = opt.strip()
+            if text:
+                normalized.append(text)
+        elif isinstance(opt, dict):
+            label = str(opt.get("label", "")).strip()
+            text = str(opt.get("text", "")).strip()
+            if label and text:
+                normalized.append(f"{label}. {text}")
+            elif text:
+                normalized.append(text)
+    return normalized
+
+
+def _normalize_entity_list(items, keys):
+    normalized = []
+    if not isinstance(items, list):
+        return normalized
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        row = {}
+        for key in keys:
+            row[key] = str(item.get(key, "")).strip()
+
+        if any(v for v in row.values()):
+            normalized.append(row)
+
+    return normalized
+
+
+def normalize_structured_data(raw_data, raw_ocr_text):
+    if not isinstance(raw_data, dict):
+        return {
+            "image_type": "unknown",
+            "visible_text": [line.strip() for line in raw_ocr_text.splitlines() if line.strip()],
+            "question_text": "",
+            "options": [],
+            "diagram_entities": [],
+            "geometry_labels": [],
+            "missing_or_unclear": ["Không đọc được JSON có cấu trúc từ model."],
+            "confidence": "",
+        }
+
+    confidence = raw_data.get("confidence", "")
+    if isinstance(confidence, (int, float)):
+        confidence = str(confidence)
+    else:
+        confidence = str(confidence).strip()
+
+    return {
+        "image_type": str(raw_data.get("image_type", "unknown")).strip() or "unknown",
+        "visible_text": _to_str_list(raw_data.get("visible_text", [])),
+        "question_text": str(raw_data.get("question_text", "")).strip(),
+        "options": _normalize_options(raw_data.get("options", [])),
+        "diagram_entities": _normalize_entity_list(
+            raw_data.get("diagram_entities", []),
+            ["name", "value", "unit", "relation"]
+        ),
+        "geometry_labels": _normalize_entity_list(
+            raw_data.get("geometry_labels", []),
+            ["object", "label", "value", "unit"]
+        ),
+        "missing_or_unclear": _to_str_list(raw_data.get("missing_or_unclear", [])),
+        "confidence": confidence,
+    }
+
+
+def build_default_data_text(data):
+    lines = []
+
+    if data.get("diagram_entities"):
+        lines.append("Dữ kiện nhìn thấy trong hình:")
+        for ent in data["diagram_entities"]:
+            name = ent.get("name", "")
+            value = ent.get("value", "")
+            unit = ent.get("unit", "")
+            relation = ent.get("relation", "")
+
+            main = f"- {name}"
+            if value:
+                main += f": {value}"
+            if unit:
+                main += f" {unit}"
+            if relation:
+                main += f" ({relation})"
+            lines.append(main)
+
+    if data.get("geometry_labels"):
+        if lines:
+            lines.append("")
+        lines.append("Nhãn hình học nhìn thấy:")
+        for ent in data["geometry_labels"]:
+            obj = ent.get("object", "")
+            label = ent.get("label", "")
+            value = ent.get("value", "")
+            unit = ent.get("unit", "")
+
+            main = f"- {obj}"
+            if label:
+                main += f" | {label}"
+            if value:
+                main += f": {value}"
+            if unit:
+                main += f" {unit}"
+            lines.append(main)
+
+    if not lines and data.get("visible_text"):
+        lines.append("Chữ/số nhìn thấy trong ảnh:")
+        for line in data["visible_text"]:
+            lines.append(f"- {line}")
+
+    return "\n".join(lines).strip()
+
+
+def build_default_options_text(data):
+    if not data.get("options"):
+        return ""
+    return "\n".join(data["options"]).strip()
+
+
+def build_missing_text(data):
+    missing = data.get("missing_or_unclear", [])
+    if not missing:
+        return ""
+    return "\n".join(f"- {item}" for item in missing).strip()
+
+
+def build_problem_text_from_image_fields(question_text, data_text, options_text, missing_text):
+    parts = []
+
+    question_text = (question_text or "").strip()
+    data_text = (data_text or "").strip()
+    options_text = (options_text or "").strip()
+    missing_text = (missing_text or "").strip()
+
+    if question_text:
+        parts.append(question_text)
+    else:
+        parts.append("[Ảnh chưa có đủ câu hỏi rõ ràng. Ba mẹ nhập thêm câu hỏi vào phần này.]")
+
+    if data_text:
+        parts.append(data_text)
+
+    if options_text:
+        parts.append("Các lựa chọn:")
+        parts.append(options_text)
+
+    if missing_text:
+        parts.append("Phần chưa rõ từ ảnh:")
+        parts.append(missing_text)
+
+    return "\n\n".join(parts).strip()
+
+
+def process_uploaded_image(img, typed_problem):
+    raw_ocr_text = generate_multimodal_response(
+        system_prompt="Bạn là trợ lý OCR thuần, chỉ chép đúng nội dung nhìn thấy trong ảnh.",
+        image=img,
+        user_input=OCR_ONLY_PROMPT
+    ).strip()
+
+    structured_response = generate_multimodal_response(
+        system_prompt="Bạn là trợ lý trích xuất dữ kiện toán lớp 3 từ ảnh sang JSON có cấu trúc.",
+        image=img,
+        user_input=build_structured_extraction_prompt(raw_ocr_text)
+    ).strip()
+
+    parsed_json = _extract_json_object(structured_response)
+    structured_data = normalize_structured_data(parsed_json, raw_ocr_text)
+
+    question_text = typed_problem.strip() if typed_problem.strip() else structured_data.get("question_text", "")
+    data_text = build_default_data_text(structured_data)
+    options_text = build_default_options_text(structured_data)
+    missing_text = build_missing_text(structured_data)
+
+    st.session_state.pending_image = img.copy()
+    st.session_state.image_raw_ocr_text = raw_ocr_text
+    st.session_state.image_structured_data = structured_data
+    st.session_state.image_question_text = question_text
+    st.session_state.image_data_text = data_text
+    st.session_state.image_options_text = options_text
+    st.session_state.image_missing_text = missing_text
+
+    st.session_state.confirm_problem_text = build_problem_text_from_image_fields(
+        question_text=question_text,
+        data_text=data_text,
+        options_text=options_text,
+        missing_text=missing_text,
+    )
+
+    st.session_state.problem_text = st.session_state.confirm_problem_text
+    st.session_state.problem_confirmed = False
+
+
+# =========================================================
+# LEARNING FLOW HELPERS
+# =========================================================
 def reset_learning_flow():
     st.session_state.chat_history = []
     st.session_state.summary = ""
@@ -148,9 +501,9 @@ def get_child_help_response_settings():
     return "goi_y", False
 
 
-# =========================
-# 1. CỔNG MỞ KHÓA ĐƠN GIẢN
-# =========================
+# =========================================================
+# APP
+# =========================================================
 if "dang_nhap_thanh_cong" not in st.session_state:
     st.session_state.dang_nhap_thanh_cong = False
 
@@ -175,6 +528,7 @@ else:
         if st.button("Đăng xuất 🚪"):
             st.session_state.dang_nhap_thanh_cong = False
             reset_session(st)
+            clear_image_state()
             st.rerun()
 
     st.subheader("1) Chọn cách dùng")
@@ -184,7 +538,6 @@ else:
         options=["Con học cùng app", "Ba mẹ dạy con"],
         horizontal=True
     )
-
     st.session_state.mode = "child" if mode_label == "Con học cùng app" else "parent"
 
     support_map = {
@@ -214,8 +567,8 @@ else:
 
     typed_problem = st.text_area(
         "Hoặc gõ đề bài vào đây",
-        value=st.session_state.problem_text,
-        height=120,
+        value=st.session_state.problem_text if not st.session_state.problem_confirmed else "",
+        height=140,
         placeholder="Ví dụ: Lan có 24 quyển vở, mẹ mua thêm cho Lan 8 quyển nữa. Hỏi Lan có tất cả bao nhiêu quyển vở?"
     )
 
@@ -223,51 +576,20 @@ else:
 
     with col_a:
         if st.button("Bắt đầu bài này ✨"):
-            if typed_problem.strip():
+            if uploaded_file is not None:
+                try:
+                    img = Image.open(uploaded_file)
+                    process_uploaded_image(img, typed_problem)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Lỗi khi đọc ảnh: {e}")
+
+            elif typed_problem.strip():
+                clear_image_state()
                 st.session_state.problem_text = typed_problem.strip()
                 st.session_state.problem_confirmed = True
                 start_problem_session()
                 st.rerun()
-
-            elif uploaded_file is not None:
-                try:
-                    img = Image.open(uploaded_file)
-                    st.session_state.pending_image = img
-
-                    image_prompt = """
-Nhiệm vụ của bạn là OCR THUẦN cho ảnh đề toán.
-
-Luật bắt buộc:
-1. Chỉ chép lại đúng chữ, số, ký hiệu NHÌN THẤY TRONG ẢNH.
-2. Không được suy luận thêm nội dung không có trong ảnh.
-3. Không được tự thêm:
-   - câu hỏi
-   - đáp án A/B/C/D
-   - dữ kiện
-   - lời giải
-   - diễn giải
-4. Nếu ảnh chỉ có hình, sơ đồ, nhãn, số đo, thì chỉ trả về đúng các chữ và số nhìn thấy.
-5. Giữ nguyên line break hợp lý để dễ đọc.
-6. Nếu một phần chữ mờ hoặc không chắc, ghi [KHÔNG ĐỌC RÕ].
-7. Không giải bài.
-8. Không giải thích thêm.
-9. Không tóm tắt.
-10. Không viết câu mở đầu.
-
-Chỉ trả về phần OCR thô từ ảnh.
-"""
-                    extracted_text = generate_multimodal_response(
-                        system_prompt="Bạn là trợ lý OCR thuần, chỉ chép đúng nội dung nhìn thấy trong ảnh.",
-                        image=img,
-                        user_input=image_prompt
-                    )
-
-                    st.session_state.problem_text = extracted_text.strip()
-                    st.session_state.problem_confirmed = False
-                    st.rerun()
-
-                except Exception as e:
-                    st.error(f"Lỗi khi đọc ảnh: {e}")
 
             else:
                 st.warning("Bạn hãy gõ đề bài hoặc tải ảnh lên trước nhé.")
@@ -275,17 +597,91 @@ Chỉ trả về phần OCR thô từ ảnh.
     with col_b:
         if st.button("Làm bài mới 🧹"):
             reset_session(st)
+            clear_image_state()
             st.rerun()
 
     if st.session_state.problem_text and not st.session_state.problem_confirmed:
         st.divider()
         st.subheader("3) Xác nhận đề bài")
 
-        st.info("Thầy đọc được từ ảnh như sau. Ba mẹ kiểm tra và sửa lại nếu ảnh không chứa đầy đủ đề bài:")
+        if st.session_state.pending_image is not None:
+            st.info("App đã đọc ảnh theo 2 bước: OCR thô + trích dữ kiện có cấu trúc. Ba mẹ kiểm tra và sửa lại trước khi bắt đầu.")
+
+            col_img, col_data = st.columns([1, 1])
+
+            with col_img:
+                st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
+
+            with col_data:
+                structured = st.session_state.image_structured_data or {}
+
+                st.markdown("**Thông tin app đọc từ ảnh**")
+                st.write(f"- Loại ảnh: `{structured.get('image_type', 'unknown')}`")
+                if structured.get("confidence"):
+                    st.write(f"- Độ tự tin: `{structured.get('confidence')}`")
+
+                if st.session_state.image_missing_text:
+                    st.warning("Có phần app chưa chắc hoặc chưa đọc rõ. Ba mẹ nên kiểm tra kỹ.")
+
+                with st.expander("Xem OCR thô"):
+                    st.text_area(
+                        "OCR thô",
+                        value=st.session_state.image_raw_ocr_text,
+                        height=180,
+                        disabled=True,
+                        key="raw_ocr_view"
+                    )
+
+            st.markdown("### Sửa dữ kiện đã đọc")
+            st.session_state.image_question_text = st.text_area(
+                "Câu hỏi / phần đề chữ",
+                value=st.session_state.image_question_text,
+                height=120,
+                key="image_question_text_editor"
+            )
+
+            st.session_state.image_data_text = st.text_area(
+                "Dữ kiện / nhãn / số đo đọc từ ảnh",
+                value=st.session_state.image_data_text,
+                height=180,
+                key="image_data_text_editor"
+            )
+
+            st.session_state.image_options_text = st.text_area(
+                "Các lựa chọn A/B/C/D (nếu có)",
+                value=st.session_state.image_options_text,
+                height=120,
+                key="image_options_text_editor"
+            )
+
+            st.session_state.image_missing_text = st.text_area(
+                "Phần chưa rõ từ ảnh (có thể để trống)",
+                value=st.session_state.image_missing_text,
+                height=80,
+                key="image_missing_text_editor"
+            )
+
+            col_merge, col_keep = st.columns(2)
+            with col_merge:
+                if st.button("Ghép lại đề từ dữ kiện ảnh 🔄"):
+                    st.session_state.confirm_problem_text = build_problem_text_from_image_fields(
+                        question_text=st.session_state.image_question_text,
+                        data_text=st.session_state.image_data_text,
+                        options_text=st.session_state.image_options_text,
+                        missing_text=st.session_state.image_missing_text,
+                    )
+                    st.rerun()
+
+            with col_keep:
+                st.caption("Ba mẹ có thể sửa trực tiếp ở ô bên dưới nếu muốn.")
+
+        else:
+            st.info("Ba mẹ kiểm tra lại đề bài trước khi bắt đầu.")
+
         st.text_area(
-            "Đề bài đã đọc",
-            value=st.session_state.problem_text,
-            height=150,
+            "Đề bài cuối cùng sẽ dùng để dạy",
+            value=st.session_state.confirm_problem_text,
+            height=220,
             key="confirm_problem_text"
         )
 
@@ -293,14 +689,14 @@ Chỉ trả về phần OCR thô từ ảnh.
 
         with col_c:
             if st.button("Đúng rồi ✅"):
-                st.session_state.problem_text = st.session_state.confirm_problem_text
+                st.session_state.problem_text = st.session_state.confirm_problem_text.strip()
                 st.session_state.problem_confirmed = True
                 start_problem_session()
                 st.rerun()
 
         with col_d:
             if st.button("Lưu đề đã sửa ✏️"):
-                st.session_state.problem_text = st.session_state.confirm_problem_text
+                st.session_state.problem_text = st.session_state.confirm_problem_text.strip()
                 st.success("Đã cập nhật đề bài. Nếu đúng rồi, bấm 'Đúng rồi ✅'.")
 
     if st.session_state.problem_confirmed:
@@ -309,11 +705,14 @@ Chỉ trả về phần OCR thô từ ảnh.
 
         st.caption(f"Đề bài hiện tại: {st.session_state.problem_text}")
 
+        if st.session_state.pending_image is not None:
+            with st.expander("Xem lại ảnh gốc của bài này"):
+                st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
+
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        # --------- 1 NÚT HỖ TRỢ CHÍNH CHO MODE TRẺ: HIỆN NGAY TỪ LƯỢT ĐẦU ----------
         if (
             st.session_state.mode == "child"
             and not st.session_state.is_finished
@@ -345,13 +744,13 @@ Chỉ trả về phần OCR thô từ ảnh.
         if user_reply:
             if looks_like_new_problem(user_reply):
                 start_new_problem(st, user_reply)
+                clear_image_state()
                 start_problem_session()
                 st.rerun()
 
             try:
                 run_followup_turn(user_reply=user_reply)
                 st.rerun()
-
             except Exception as e:
                 st.error(f"Lỗi khi tạo phản hồi: {e}")
 
