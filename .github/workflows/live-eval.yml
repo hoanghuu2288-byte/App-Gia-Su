@@ -21,10 +21,12 @@ jobs:
           pip install -r requirements.txt
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
-      - name: Run live eval with Gemini
+      - name: Run live eval with current text model
         id: live_eval
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_TEXT_MODEL: ${{ secrets.OPENAI_TEXT_MODEL }}
+          LIVE_EVAL_TEXT_MODEL: ${{ secrets.OPENAI_TEXT_MODEL }}
         run: |
           python scripts/run_live_eval.py
         continue-on-error: true
