@@ -1,4 +1,5 @@
 import json
+import os
 import re
 
 import streamlit as st
@@ -35,6 +36,8 @@ st.set_page_config(
 )
 
 init_app_state(st)
+
+APP_PASSWORD = os.getenv("APP_PASSWORD", "vip123").strip() or "vip123"
 
 
 # =========================================================
@@ -435,13 +438,38 @@ def process_uploaded_image(img, typed_problem):
         user_input=OCR_ONLY_PROMPT,
     ).strip()
 
+    structured_prompt = build_structured_extraction_prompt(raw_ocr_text)
     structured_response = generate_multimodal_response(
         system_prompt="Bạn là trợ lý trích xuất dữ kiện toán lớp 3 từ ảnh sang JSON có cấu trúc.",
         image=img,
-        user_input=build_structured_extraction_prompt(raw_ocr_text),
+        user_input=structured_prompt,
     ).strip()
 
     parsed_json = _extract_json_object(structured_response)
+    needs_retry = parsed_json is None
+
+    if not needs_retry and isinstance(parsed_json, dict):
+        has_question = bool(str(parsed_json.get("question_text", "")).strip())
+        has_numbers = bool(parsed_json.get("diagram_entities") or parsed_json.get("geometry_labels"))
+        needs_retry = not has_question and not typed_problem.strip() and has_numbers
+
+    if needs_retry:
+        retry_prompt = (
+            structured_prompt
+            + "\n\nNhắc lại thật nghiêm ngặt:\n"
+            + "- Chỉ trả về đúng 1 JSON object hợp lệ.\n"
+            + "- Không thêm giải thích, không markdown.\n"
+            + "- Nếu chưa chắc, để trống question_text và ghi vào missing_or_unclear.\n"
+        )
+        retry_response = generate_multimodal_response(
+            system_prompt="Bạn là trợ lý trích xuất dữ kiện toán lớp 3 từ ảnh sang JSON có cấu trúc.",
+            image=img,
+            user_input=retry_prompt,
+        ).strip()
+        retry_json = _extract_json_object(retry_response)
+        if retry_json is not None:
+            parsed_json = retry_json
+
     structured_data = normalize_structured_data(parsed_json, raw_ocr_text)
 
     question_text = typed_problem.strip() if typed_problem.strip() else structured_data.get("question_text", "")
@@ -486,6 +514,40 @@ def append_chat_message(role: str, content: str, *, hidden: bool = False):
     )
 
 
+def get_recent_assistant_responses(limit: int = 3):
+    responses = []
+    for message in reversed(st.session_state.chat_history):
+        if message.get("role") != "assistant":
+            continue
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        responses.append(content)
+        if len(responses) >= limit:
+            break
+    return responses
+
+
+def build_child_hint_request_message(hint_count: int) -> str:
+    if hint_count <= 1:
+        return (
+            "Con cần gợi ý thêm lần 1. "
+            "Nhắc rất ngắn con đang ở bước nào, rồi hỏi đúng 1 phép tính cụ thể cần làm."
+        )
+
+    if hint_count == 2:
+        return (
+            "Con cần gợi ý thêm lần 2. "
+            "Không hỏi lại chung chung. Nói thẳng phép tính cần viết ở bước này, rất ngắn gọn."
+        )
+
+    return (
+        f"Con cần gợi ý thêm lần {hint_count}. "
+        "Không được hỏi lại nữa. Không được lặp ý cũ. "
+        "Hãy nói thẳng phép tính hoặc kết quả còn thiếu, rồi chốt câu trả lời ngắn gọn và thêm 1 dòng Kiến thức cần nhớ."
+    )
+
+
 def maybe_retry_non_repeating_response(
     *,
     response: str,
@@ -495,17 +557,18 @@ def maybe_retry_non_repeating_response(
     support_level_for_response: str,
     allow_full_solution_for_response: bool,
 ):
-    previous_response = st.session_state.last_assistant_response
-
     if st.session_state.mode != "child":
-        return response
+        return response, False
 
     if reply_type != "student_dont_know":
-        return response
+        return response, False
 
-    if not responses_too_similar(previous_response, response):
-        return response
+    recent_responses = get_recent_assistant_responses(limit=3)
+    is_repetitive = any(responses_too_similar(previous, response) for previous in recent_responses)
+    if not is_repetitive:
+        return response, False
 
+    hint_count = st.session_state.hint_request_count
     stronger_support_level = support_level_for_response
     stronger_allow_full_solution = allow_full_solution_for_response
 
@@ -515,6 +578,19 @@ def maybe_retry_non_repeating_response(
         stronger_support_level = "cach_giai"
         stronger_allow_full_solution = True
 
+    if hint_count >= 3:
+        stronger_support_level = "cach_giai"
+        stronger_allow_full_solution = True
+
+    retry_instruction = build_child_hint_request_message(max(2, hint_count))
+    if hint_count >= 3:
+        retry_instruction = (
+            f"Con cần gợi ý thêm lần {hint_count} nhưng câu trước vẫn bị lặp. "
+            "Không được hỏi lại nữa. Không được lặp ý cũ. "
+            "Hãy nói thẳng: 1) phép tính hoặc kết quả còn thiếu, 2) câu trả lời đầy đủ thật ngắn, 3) 1 dòng Kiến thức cần nhớ. "
+            "Kết thúc bằng lời chốt, không kết thúc bằng câu hỏi."
+        )
+
     stronger_context = build_followup_context(
         problem_text=st.session_state.problem_text,
         mode=st.session_state.mode,
@@ -522,10 +598,7 @@ def maybe_retry_non_repeating_response(
         chat_history=st.session_state.chat_history,
         current_step=st.session_state.current_step,
         last_error_type=st.session_state.last_error_type,
-        user_input=(
-            "Con cần gợi ý thêm nhưng không được lặp lại ý cũ. "
-            "Hãy tiến thêm một nấc rõ ràng hơn, cụ thể hơn ngay bây giờ."
-        ),
+        user_input=retry_instruction,
         reply_type=reply_type,
         allow_full_solution=stronger_allow_full_solution,
         require_full_presentation=False,
@@ -539,10 +612,36 @@ def maybe_retry_non_repeating_response(
         user_input=stronger_context,
     )
 
-    if not responses_too_similar(previous_response, retry_response):
-        return retry_response
+    retry_repetitive = any(responses_too_similar(previous, retry_response) for previous in recent_responses)
+    if not retry_repetitive:
+        return retry_response, hint_count >= 3 and stronger_allow_full_solution
 
-    return response
+    forced_final_context = build_followup_context(
+        problem_text=st.session_state.problem_text,
+        mode=st.session_state.mode,
+        support_level="cach_giai",
+        chat_history=st.session_state.chat_history,
+        current_step=st.session_state.current_step,
+        last_error_type=st.session_state.last_error_type,
+        user_input=(
+            "Con vẫn đang bí sau nhiều lượt gợi ý và các câu trước đang bị lặp. "
+            "Không hỏi thêm nữa. Không nhắc lại dữ kiện dài dòng. "
+            "Hãy nói thẳng phép tính hoặc kết quả còn thiếu, chốt đáp án đầy đủ thật ngắn, rồi thêm 1 dòng Kiến thức cần nhớ. "
+            "Bắt buộc không kết thúc bằng câu hỏi."
+        ),
+        reply_type=reply_type,
+        allow_full_solution=True,
+        require_full_presentation=False,
+        small_error=False,
+        stuck_count=max(st.session_state.stuck_count, 3),
+        is_finished=False,
+    )
+
+    forced_final_response = generate_text_response(
+        system_prompt=system_prompt,
+        user_input=forced_final_context,
+    )
+    return forced_final_response, True
 
 
 def start_problem_session():
@@ -625,7 +724,7 @@ def run_followup_turn(
         user_input=followup_context,
     )
 
-    response = maybe_retry_non_repeating_response(
+    response, forced_finished = maybe_retry_non_repeating_response(
         response=response,
         system_prompt=system_prompt,
         followup_context=followup_context,
@@ -634,7 +733,14 @@ def run_followup_turn(
         allow_full_solution_for_response=allow_full_solution_for_response,
     )
 
-    st.session_state.is_finished = detect_finished_response(response)
+    st.session_state.is_finished = (
+        forced_finished
+        or should_mark_finished_after_child_help(
+            response,
+            st.session_state.hint_request_count if st.session_state.mode == "child" else 0,
+        )
+        or detect_finished_response(response)
+    )
     if st.session_state.is_finished:
         st.session_state.show_help_buttons = False
         st.session_state.show_hint_button = False
@@ -672,7 +778,7 @@ if not st.session_state.dang_nhap_thanh_cong:
     mat_khau = st.text_input("Nhập mã bản quyền:", type="password")
 
     if st.button("Mở Khóa 🚀"):
-        if mat_khau == "vip123":
+        if mat_khau == APP_PASSWORD:
             st.session_state.dang_nhap_thanh_cong = True
             st.rerun()
         else:
@@ -775,7 +881,7 @@ else:
             col_img, col_data = st.columns([1, 1])
 
             with col_img:
-                st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
+                _ = st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
 
             with col_data:
                 st.markdown("**Thông tin app đọc từ ảnh**")
@@ -874,7 +980,7 @@ else:
 
         if st.session_state.pending_image is not None:
             with st.expander("Xem lại ảnh gốc của bài này"):
-                st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
+                _ = st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
 
         for message in st.session_state.chat_history:
             if message.get("hidden"):
@@ -891,14 +997,21 @@ else:
             st.caption('Con bí thì bấm **Gợi ý thêm**, không cần gõ "không biết".')
 
             if st.button("Gợi ý thêm", key="child_help_button"):
+                if should_mark_finished_after_child_help(
+                    st.session_state.last_assistant_response,
+                    st.session_state.hint_request_count,
+                ):
+                    st.session_state.is_finished = True
+                    st.session_state.show_help_buttons = False
+                    st.session_state.show_hint_button = False
+                    st.session_state.show_solution_button = False
+                    st.rerun()
+
                 st.session_state.hint_request_count += 1
                 support_level_for_response, allow_full_solution_for_response = get_child_help_response_settings()
 
                 run_followup_turn(
-                    user_reply=(
-                        f"Con cần gợi ý thêm lần {st.session_state.hint_request_count}. "
-                        "Không lặp lại gợi ý cũ. Hãy tiến thêm một nấc rõ ràng hơn."
-                    ),
+                    user_reply=build_child_hint_request_message(st.session_state.hint_request_count),
                     reply_type_override="student_dont_know",
                     support_level_override=support_level_for_response,
                     allow_full_solution_override=allow_full_solution_for_response,
