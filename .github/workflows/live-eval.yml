@@ -39,5 +39,5 @@ jobs:
       - name: Fail workflow if eval failed
         if: steps.live_eval.outcome == 'failure'
         run: |
-          echo "Live eval có case fail. Xem artifact để biết chi tiết."
+          echo "Live eval có case fail. Tải artifact để xem chi tiết."
           exit 1
