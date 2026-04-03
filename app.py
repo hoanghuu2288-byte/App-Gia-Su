@@ -24,6 +24,8 @@ from logic import (
     is_small_error,
     update_stuck_ui,
     detect_finished_response,
+    normalize_user_input,
+    responses_too_similar,
 )
 
 st.set_page_config(
@@ -473,6 +475,74 @@ def reset_learning_flow():
     st.session_state.is_finished = False
     st.session_state.current_step = "start"
     st.session_state.last_error_type = ""
+    st.session_state.hint_request_count = 0
+    st.session_state.last_real_user_reply = ""
+    st.session_state.last_assistant_response = ""
+
+
+def append_chat_message(role: str, content: str, *, hidden: bool = False):
+    st.session_state.chat_history.append(
+        {"role": role, "content": content, "hidden": hidden}
+    )
+
+
+def maybe_retry_non_repeating_response(
+    *,
+    response: str,
+    system_prompt: str,
+    followup_context: str,
+    reply_type: str,
+    support_level_for_response: str,
+    allow_full_solution_for_response: bool,
+):
+    previous_response = st.session_state.last_assistant_response
+
+    if st.session_state.mode != "child":
+        return response
+
+    if reply_type != "student_dont_know":
+        return response
+
+    if not responses_too_similar(previous_response, response):
+        return response
+
+    stronger_support_level = support_level_for_response
+    stronger_allow_full_solution = allow_full_solution_for_response
+
+    if support_level_for_response == "goi_y":
+        stronger_support_level = "tung_buoc"
+    elif support_level_for_response == "tung_buoc":
+        stronger_support_level = "cach_giai"
+        stronger_allow_full_solution = True
+
+    stronger_context = build_followup_context(
+        problem_text=st.session_state.problem_text,
+        mode=st.session_state.mode,
+        support_level=stronger_support_level,
+        chat_history=st.session_state.chat_history,
+        current_step=st.session_state.current_step,
+        last_error_type=st.session_state.last_error_type,
+        user_input=(
+            "Con cần gợi ý thêm nhưng không được lặp lại ý cũ. "
+            "Hãy tiến thêm một nấc rõ ràng hơn, cụ thể hơn ngay bây giờ."
+        ),
+        reply_type=reply_type,
+        allow_full_solution=stronger_allow_full_solution,
+        require_full_presentation=False,
+        small_error=False,
+        stuck_count=st.session_state.stuck_count,
+        is_finished=st.session_state.is_finished,
+    )
+
+    retry_response = generate_text_response(
+        system_prompt=system_prompt,
+        user_input=stronger_context,
+    )
+
+    if not responses_too_similar(previous_response, retry_response):
+        return retry_response
+
+    return response
 
 
 def start_problem_session():
@@ -490,9 +560,8 @@ def start_problem_session():
     )
 
     st.session_state.is_finished = detect_finished_response(response)
-    st.session_state.chat_history.append(
-        {"role": "assistant", "content": response}
-    )
+    append_chat_message("assistant", response)
+    st.session_state.last_assistant_response = response
 
 
 def run_followup_turn(
@@ -502,13 +571,18 @@ def run_followup_turn(
     support_level_override=None,
     allow_full_solution_override=None,
     append_user_message=True,
+    user_message_hidden=False,
 ):
+    normalized_user_reply = normalize_user_input(user_reply)
+
     if append_user_message:
-        st.session_state.chat_history.append(
-            {"role": "user", "content": user_reply}
+        append_chat_message(
+            "user",
+            normalized_user_reply,
+            hidden=user_message_hidden,
         )
 
-    reply_type = reply_type_override or classify_user_reply(user_reply)
+    reply_type = reply_type_override or classify_user_reply(normalized_user_reply)
 
     update_step_and_error(st, reply_type)
     update_stuck_ui(st, reply_type)
@@ -517,8 +591,8 @@ def run_followup_turn(
         require_full_presentation = False
         small_error = False
     else:
-        require_full_presentation = should_require_full_presentation(st, user_reply)
-        small_error = is_small_error(user_reply)
+        require_full_presentation = should_require_full_presentation(st, normalized_user_reply)
+        small_error = is_small_error(normalized_user_reply)
 
     update_presentation_retry(st, require_full_presentation)
 
@@ -536,7 +610,7 @@ def run_followup_turn(
         chat_history=st.session_state.chat_history,
         current_step=st.session_state.current_step,
         last_error_type=st.session_state.last_error_type,
-        user_input=user_reply,
+        user_input=normalized_user_reply,
         reply_type=reply_type,
         allow_full_solution=allow_full_solution_for_response,
         require_full_presentation=require_full_presentation,
@@ -545,9 +619,19 @@ def run_followup_turn(
         is_finished=st.session_state.is_finished,
     )
 
+    system_prompt = get_system_prompt(st.session_state.mode)
     response = generate_text_response(
-        system_prompt=get_system_prompt(st.session_state.mode),
+        system_prompt=system_prompt,
         user_input=followup_context,
+    )
+
+    response = maybe_retry_non_repeating_response(
+        response=response,
+        system_prompt=system_prompt,
+        followup_context=followup_context,
+        reply_type=reply_type,
+        support_level_for_response=support_level_for_response,
+        allow_full_solution_for_response=allow_full_solution_for_response,
     )
 
     st.session_state.is_finished = detect_finished_response(response)
@@ -556,19 +640,20 @@ def run_followup_turn(
         st.session_state.show_hint_button = False
         st.session_state.show_solution_button = False
 
-    st.session_state.chat_history.append(
-        {"role": "assistant", "content": response}
-    )
+    append_chat_message("assistant", response)
+    st.session_state.last_assistant_response = response
 
 
 def get_child_help_response_settings():
+    hint_count = st.session_state.hint_request_count
+
     if st.session_state.support_level == "cach_giai":
         return "cach_giai", True
 
-    if st.session_state.stuck_count >= 4:
+    if st.session_state.stuck_count >= 4 or hint_count >= 3:
         return "cach_giai", True
 
-    if st.session_state.support_level == "tung_buoc" or st.session_state.stuck_count >= 2:
+    if st.session_state.support_level == "tung_buoc" or st.session_state.stuck_count >= 2 or hint_count >= 2:
         return "tung_buoc", False
 
     return "goi_y", False
@@ -792,6 +877,8 @@ else:
                 st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
 
         for message in st.session_state.chat_history:
+            if message.get("hidden"):
+                continue
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
@@ -804,14 +891,19 @@ else:
             st.caption('Con bí thì bấm **Gợi ý thêm**, không cần gõ "không biết".')
 
             if st.button("Gợi ý thêm", key="child_help_button"):
+                st.session_state.hint_request_count += 1
                 support_level_for_response, allow_full_solution_for_response = get_child_help_response_settings()
 
                 run_followup_turn(
-                    user_reply="con cần gợi ý thêm",
+                    user_reply=(
+                        f"Con cần gợi ý thêm lần {st.session_state.hint_request_count}. "
+                        "Không lặp lại gợi ý cũ. Hãy tiến thêm một nấc rõ ràng hơn."
+                    ),
                     reply_type_override="student_dont_know",
                     support_level_override=support_level_for_response,
                     allow_full_solution_override=allow_full_solution_for_response,
-                    append_user_message=False,
+                    append_user_message=True,
+                    user_message_hidden=True,
                 )
                 st.rerun()
 
@@ -824,6 +916,9 @@ else:
         user_reply = st.chat_input(placeholder_text)
 
         if user_reply:
+            st.session_state.hint_request_count = 0
+            st.session_state.last_real_user_reply = user_reply
+
             if looks_like_new_problem(user_reply):
                 start_new_problem(st, user_reply)
                 clear_image_state()
