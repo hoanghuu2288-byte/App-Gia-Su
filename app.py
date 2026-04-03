@@ -70,10 +70,10 @@ def start_problem_session():
 def run_followup_turn(
     user_reply: str,
     *,
-    reply_type_override: str | None = None,
-    support_level_override: str | None = None,
-    allow_full_solution_override: bool | None = None,
-    append_user_message: bool = True,
+    reply_type_override=None,
+    support_level_override=None,
+    allow_full_solution_override=None,
+    append_user_message=True,
 ):
     if append_user_message:
         st.session_state.chat_history.append({
@@ -235,13 +235,29 @@ else:
                     st.session_state.pending_image = img
 
                     image_prompt = """
-Hãy đọc đúng nguyên văn đề toán trong ảnh.
-Chỉ trả về phần đề bài đã đọc được.
-Không giải bài.
-Không giải thích thêm.
+Nhiệm vụ của bạn là OCR THUẦN cho ảnh đề toán.
+
+Luật bắt buộc:
+1. Chỉ chép lại đúng chữ, số, ký hiệu NHÌN THẤY TRONG ẢNH.
+2. Không được suy luận thêm nội dung không có trong ảnh.
+3. Không được tự thêm:
+   - câu hỏi
+   - đáp án A/B/C/D
+   - dữ kiện
+   - lời giải
+   - diễn giải
+4. Nếu ảnh chỉ có hình, sơ đồ, nhãn, số đo, thì chỉ trả về đúng các chữ và số nhìn thấy.
+5. Giữ nguyên line break hợp lý để dễ đọc.
+6. Nếu một phần chữ mờ hoặc không chắc, ghi [KHÔNG ĐỌC RÕ].
+7. Không giải bài.
+8. Không giải thích thêm.
+9. Không tóm tắt.
+10. Không viết câu mở đầu.
+
+Chỉ trả về phần OCR thô từ ảnh.
 """
                     extracted_text = generate_multimodal_response(
-                        system_prompt="Bạn là trợ lý đọc đề bài từ ảnh.",
+                        system_prompt="Bạn là trợ lý OCR thuần, chỉ chép đúng nội dung nhìn thấy trong ảnh.",
                         image=img,
                         user_input=image_prompt
                     )
@@ -265,7 +281,7 @@ Không giải thích thêm.
         st.divider()
         st.subheader("3) Xác nhận đề bài")
 
-        st.info("Thầy đọc đề như sau:")
+        st.info("Thầy đọc được từ ảnh như sau. Ba mẹ kiểm tra và sửa lại nếu ảnh không chứa đầy đủ đề bài:")
         st.text_area(
             "Đề bài đã đọc",
             value=st.session_state.problem_text,
