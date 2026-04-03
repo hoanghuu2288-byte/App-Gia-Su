@@ -19,6 +19,8 @@ from logic import (
     should_require_full_presentation,
     update_presentation_retry,
     should_mark_finished_after_child_help,
+    generate_opening_tutoring_response,
+    generate_followup_tutoring_response,
 )
 
 
@@ -263,3 +265,88 @@ def test_should_mark_finished_after_child_help_true_after_many_hints():
         "Kiến thức cần nhớ: Tìm số còn lại thì lấy số dự tính trừ số đã có."
     )
     assert should_mark_finished_after_child_help(text, hint_request_count=3) is True
+
+
+def test_generate_opening_tutoring_response_child_geometry():
+    response = generate_opening_tutoring_response(
+        """Câu 4: (1 điểm) Cho hình vẽ. Từ vị trí ong vàng đến vườn hoa nào là xa nhất?
+
+Dữ kiện nhìn thấy trong hình:
+- Đường đến Vườn hoa hồng: 42890 m
+- Đường đến Vườn hoa lan: 35000 m
+- Đường đến Vườn hoa cúc: 45050 m
+- Đường đến Vườn hoa hướng dương: 25090 m
+
+Các lựa chọn:
+A. Vườn hoa hồng
+B. Vườn hoa lan
+C. Vườn hoa cúc
+D. Vườn hoa hướng dương
+""",
+        mode="child",
+        support_level="goi_y",
+    )
+
+    assert "Dạng bài" in response
+    assert "45050" in response or "45 050" in response
+
+
+def test_generate_followup_tutoring_response_child_geometry_finalizes_choice():
+    chat_history = [
+        {"role": "assistant", "content": "opening"},
+        {"role": "user", "content": "Chọn đáp án C"},
+    ]
+    response = generate_followup_tutoring_response(
+        problem_text="""Câu 4: (1 điểm) Cho hình vẽ. Từ vị trí ong vàng đến vườn hoa nào là xa nhất?
+
+Dữ kiện nhìn thấy trong hình:
+- Đường đến Vườn hoa hồng: 42890 m
+- Đường đến Vườn hoa lan: 35000 m
+- Đường đến Vườn hoa cúc: 45050 m
+- Đường đến Vườn hoa hướng dương: 25090 m
+
+Các lựa chọn:
+A. Vườn hoa hồng
+B. Vườn hoa lan
+C. Vườn hoa cúc
+D. Vườn hoa hướng dương
+""",
+        mode="child",
+        support_level="goi_y",
+        chat_history=chat_history,
+        user_input="Chọn đáp án C",
+        reply_type="normal_reply",
+        allow_full_solution=False,
+        require_full_presentation=False,
+        small_error=False,
+        stuck_count=0,
+        is_finished=False,
+        hint_request_count=0,
+    )
+
+    assert "Vườn hoa cúc" in response
+    assert "Kiến thức cần nhớ" in response
+
+
+def test_generate_followup_tutoring_response_rut_ve_don_vi_finalizes():
+    chat_history = [
+        {"role": "assistant", "content": "opening"},
+        {"role": "user", "content": "72"},
+    ]
+    response = generate_followup_tutoring_response(
+        problem_text="Có 6 hộp bút như nhau đựng tất cả 48 chiếc bút. Hỏi 9 hộp như thế đựng bao nhiêu chiếc bút?",
+        mode="child",
+        support_level="goi_y",
+        chat_history=chat_history,
+        user_input="72",
+        reply_type="student_number_only",
+        allow_full_solution=False,
+        require_full_presentation=False,
+        small_error=True,
+        stuck_count=0,
+        is_finished=False,
+        hint_request_count=0,
+    )
+
+    assert "72 chiếc bút" in response
+    assert "Kiến thức cần nhớ" in response
