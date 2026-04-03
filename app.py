@@ -29,14 +29,14 @@ from logic import (
 st.set_page_config(
     page_title="Trợ lý học Toán lớp 3",
     page_icon="🎓",
-    layout="centered"
+    layout="centered",
 )
 
 init_app_state(st)
 
 
 # =========================================================
-# IMAGE / OCR / STRUCTURED EXTRACTION HELPERS
+# IMAGE / OCR / STRUCTURED EXTRACTION
 # =========================================================
 def ensure_image_state():
     defaults = {
@@ -46,6 +46,7 @@ def ensure_image_state():
         "image_data_text": "",
         "image_options_text": "",
         "image_missing_text": "",
+        "confirm_problem_text": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -60,10 +61,10 @@ def clear_image_state():
     st.session_state.image_data_text = ""
     st.session_state.image_options_text = ""
     st.session_state.image_missing_text = ""
+    st.session_state.confirm_problem_text = ""
 
 
 ensure_image_state()
-
 
 OCR_ONLY_PROMPT = """
 Nhiệm vụ của bạn là OCR THUẦN cho ảnh đề toán.
@@ -78,31 +79,32 @@ Luật bắt buộc:
    - lời giải
    - diễn giải
 4. Nếu ảnh chỉ có hình, sơ đồ, nhãn, số đo, thì chỉ trả về đúng các chữ và số nhìn thấy.
-5. Giữ nguyên line break hợp lý để dễ đọc.
-6. Nếu một phần chữ mờ hoặc không chắc, ghi [KHÔNG ĐỌC RÕ].
+5. Giữ line break hợp lý để dễ đọc.
+6. Nếu chỗ nào mờ hoặc không chắc, ghi [KHÔNG ĐỌC RÕ].
 7. Không giải bài.
 8. Không giải thích thêm.
 9. Không tóm tắt.
 10. Không viết câu mở đầu.
 
-Chỉ trả về phần OCR thô từ ảnh.
+Chỉ trả về phần OCR thô.
 """
 
 
 def build_structured_extraction_prompt(raw_ocr_text: str) -> str:
     return f"""
-Bạn đang làm nhiệm vụ TRÍCH XUẤT DỮ KIỆN TOÁN LỚP 3 TỪ ẢNH theo JSON có cấu trúc.
+Bạn đang làm nhiệm vụ TRÍCH XUẤT DỮ KIỆN TOÁN LỚP 3 TỪ ẢNH theo JSON.
 
 Rất quan trọng:
-- Chỉ dùng những gì NHÌN THẤY trong ảnh.
+- Chỉ dùng những gì thực sự NHÌN THẤY trong ảnh.
 - Có thể tham khảo OCR thô bên dưới để đối chiếu.
-- Không được tự bịa thêm câu hỏi, đáp án, dữ kiện.
+- Không được bịa thêm câu hỏi, đáp án, dữ kiện.
 - Nếu ảnh không có đủ câu hỏi thì để question_text rỗng.
 - Nếu ảnh không có lựa chọn A/B/C/D thì options phải là [].
 - Nếu chỗ nào không chắc, ghi vào missing_or_unclear.
 - Không giải bài.
 - Không mô tả lan man.
-- Chỉ trả về 1 JSON object hợp lệ, không thêm markdown, không thêm lời giải thích.
+- Chỉ trả về 1 JSON object hợp lệ.
+- Không dùng markdown, không có ```json.
 
 Schema bắt buộc:
 {{
@@ -154,7 +156,7 @@ def _extract_json_object(text: str):
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start:end + 1]
+        candidate = cleaned[start : end + 1]
         try:
             return json.loads(candidate)
         except Exception:
@@ -196,6 +198,7 @@ def _normalize_options(options):
                 normalized.append(f"{label}. {text}")
             elif text:
                 normalized.append(text)
+
     return normalized
 
 
@@ -218,6 +221,61 @@ def _normalize_entity_list(items, keys):
     return normalized
 
 
+def _safe_confidence_value(raw_value):
+    try:
+        value = float(raw_value)
+        if value < 0:
+            return 0.0
+        if value > 1:
+            return 1.0
+        return value
+    except Exception:
+        return None
+
+
+def infer_image_type(data: dict) -> str:
+    raw_type = str(data.get("image_type", "")).strip().lower()
+
+    if data.get("geometry_labels"):
+        return "geometry"
+
+    if data.get("diagram_entities") and (data.get("question_text") or data.get("visible_text")):
+        return "mixed_text_diagram"
+
+    if data.get("diagram_entities"):
+        return "diagram"
+
+    if data.get("question_text") or data.get("visible_text"):
+        return "text_only"
+
+    if raw_type:
+        return raw_type
+
+    return "unknown"
+
+
+def image_type_label(image_type: str) -> str:
+    mapping = {
+        "text_only": "Ảnh chữ",
+        "diagram": "Ảnh sơ đồ",
+        "geometry": "Ảnh hình học",
+        "mixed": "Ảnh hỗn hợp",
+        "mixed_text_diagram": "Ảnh chữ + sơ đồ",
+        "unknown": "Chưa rõ",
+    }
+    return mapping.get(image_type, image_type)
+
+
+def confidence_label(conf_value):
+    if conf_value is None:
+        return "Chưa rõ"
+    if conf_value >= 0.85:
+        return "Cao"
+    if conf_value >= 0.60:
+        return "Vừa"
+    return "Thấp"
+
+
 def normalize_structured_data(raw_data, raw_ocr_text):
     if not isinstance(raw_data, dict):
         return {
@@ -228,31 +286,28 @@ def normalize_structured_data(raw_data, raw_ocr_text):
             "diagram_entities": [],
             "geometry_labels": [],
             "missing_or_unclear": ["Không đọc được JSON có cấu trúc từ model."],
-            "confidence": "",
+            "confidence_value": None,
         }
 
-    confidence = raw_data.get("confidence", "")
-    if isinstance(confidence, (int, float)):
-        confidence = str(confidence)
-    else:
-        confidence = str(confidence).strip()
-
-    return {
+    structured = {
         "image_type": str(raw_data.get("image_type", "unknown")).strip() or "unknown",
         "visible_text": _to_str_list(raw_data.get("visible_text", [])),
         "question_text": str(raw_data.get("question_text", "")).strip(),
         "options": _normalize_options(raw_data.get("options", [])),
         "diagram_entities": _normalize_entity_list(
             raw_data.get("diagram_entities", []),
-            ["name", "value", "unit", "relation"]
+            ["name", "value", "unit", "relation"],
         ),
         "geometry_labels": _normalize_entity_list(
             raw_data.get("geometry_labels", []),
-            ["object", "label", "value", "unit"]
+            ["object", "label", "value", "unit"],
         ),
         "missing_or_unclear": _to_str_list(raw_data.get("missing_or_unclear", [])),
-        "confidence": confidence,
+        "confidence_value": _safe_confidence_value(raw_data.get("confidence")),
     }
+
+    structured["image_type"] = infer_image_type(structured)
+    return structured
 
 
 def build_default_data_text(data):
@@ -266,14 +321,14 @@ def build_default_data_text(data):
             unit = ent.get("unit", "")
             relation = ent.get("relation", "")
 
-            main = f"- {name}"
+            row = f"- {name}"
             if value:
-                main += f": {value}"
+                row += f": {value}"
             if unit:
-                main += f" {unit}"
+                row += f" {unit}"
             if relation:
-                main += f" ({relation})"
-            lines.append(main)
+                row += f" ({relation})"
+            lines.append(row)
 
     if data.get("geometry_labels"):
         if lines:
@@ -285,14 +340,14 @@ def build_default_data_text(data):
             value = ent.get("value", "")
             unit = ent.get("unit", "")
 
-            main = f"- {obj}"
+            row = f"- {obj}"
             if label:
-                main += f" | {label}"
+                row += f" | {label}"
             if value:
-                main += f": {value}"
+                row += f": {value}"
             if unit:
-                main += f" {unit}"
-            lines.append(main)
+                row += f" {unit}"
+            lines.append(row)
 
     if not lines and data.get("visible_text"):
         lines.append("Chữ/số nhìn thấy trong ảnh:")
@@ -309,7 +364,7 @@ def build_default_options_text(data):
 
 
 def build_missing_text(data):
-    missing = data.get("missing_or_unclear", [])
+    missing = list(data.get("missing_or_unclear", []))
     if not missing:
         return ""
     return "\n".join(f"- {item}" for item in missing).strip()
@@ -342,17 +397,46 @@ def build_problem_text_from_image_fields(question_text, data_text, options_text,
     return "\n\n".join(parts).strip()
 
 
+def validate_structured_problem(question_text, data_text, structured_data):
+    warnings = []
+
+    if not (question_text or "").strip():
+        warnings.append("Ảnh chưa có đủ câu hỏi rõ ràng. Ba mẹ nên nhập thêm phần đề chữ trước khi bắt đầu.")
+
+    if not (data_text or "").strip():
+        warnings.append("App chưa trích được dữ kiện rõ ràng từ ảnh. Ba mẹ nên kiểm tra OCR thô hoặc nhập lại dữ kiện.")
+
+    conf = structured_data.get("confidence_value")
+    if conf is not None and conf < 0.60:
+        warnings.append("Độ tự tin của phần đọc ảnh đang thấp. Ba mẹ nên kiểm tra kỹ trước khi dùng.")
+
+    if structured_data.get("missing_or_unclear"):
+        warnings.append("Có phần app chưa chắc hoặc chưa đọc rõ trong ảnh.")
+
+    return warnings
+
+
+def rebuild_confirm_text_from_fields():
+    st.session_state.confirm_problem_text = build_problem_text_from_image_fields(
+        question_text=st.session_state.image_question_text,
+        data_text=st.session_state.image_data_text,
+        options_text=st.session_state.image_options_text,
+        missing_text=st.session_state.image_missing_text,
+    )
+    st.session_state.problem_text = st.session_state.confirm_problem_text
+
+
 def process_uploaded_image(img, typed_problem):
     raw_ocr_text = generate_multimodal_response(
         system_prompt="Bạn là trợ lý OCR thuần, chỉ chép đúng nội dung nhìn thấy trong ảnh.",
         image=img,
-        user_input=OCR_ONLY_PROMPT
+        user_input=OCR_ONLY_PROMPT,
     ).strip()
 
     structured_response = generate_multimodal_response(
         system_prompt="Bạn là trợ lý trích xuất dữ kiện toán lớp 3 từ ảnh sang JSON có cấu trúc.",
         image=img,
-        user_input=build_structured_extraction_prompt(raw_ocr_text)
+        user_input=build_structured_extraction_prompt(raw_ocr_text),
     ).strip()
 
     parsed_json = _extract_json_object(structured_response)
@@ -371,19 +455,12 @@ def process_uploaded_image(img, typed_problem):
     st.session_state.image_options_text = options_text
     st.session_state.image_missing_text = missing_text
 
-    st.session_state.confirm_problem_text = build_problem_text_from_image_fields(
-        question_text=question_text,
-        data_text=data_text,
-        options_text=options_text,
-        missing_text=missing_text,
-    )
-
-    st.session_state.problem_text = st.session_state.confirm_problem_text
+    rebuild_confirm_text_from_fields()
     st.session_state.problem_confirmed = False
 
 
 # =========================================================
-# LEARNING FLOW HELPERS
+# LEARNING FLOW
 # =========================================================
 def reset_learning_flow():
     st.session_state.chat_history = []
@@ -404,20 +481,18 @@ def start_problem_session():
     initial_context = build_initial_context(
         problem_text=st.session_state.problem_text,
         mode=st.session_state.mode,
-        support_level=st.session_state.support_level
+        support_level=st.session_state.support_level,
     )
 
     response = generate_text_response(
         system_prompt=get_system_prompt(st.session_state.mode),
-        user_input=initial_context
+        user_input=initial_context,
     )
 
     st.session_state.is_finished = detect_finished_response(response)
-
-    st.session_state.chat_history.append({
-        "role": "assistant",
-        "content": response
-    })
+    st.session_state.chat_history.append(
+        {"role": "assistant", "content": response}
+    )
 
 
 def run_followup_turn(
@@ -429,10 +504,9 @@ def run_followup_turn(
     append_user_message=True,
 ):
     if append_user_message:
-        st.session_state.chat_history.append({
-            "role": "user",
-            "content": user_reply
-        })
+        st.session_state.chat_history.append(
+            {"role": "user", "content": user_reply}
+        )
 
     reply_type = reply_type_override or classify_user_reply(user_reply)
 
@@ -473,7 +547,7 @@ def run_followup_turn(
 
     response = generate_text_response(
         system_prompt=get_system_prompt(st.session_state.mode),
-        user_input=followup_context
+        user_input=followup_context,
     )
 
     st.session_state.is_finished = detect_finished_response(response)
@@ -482,10 +556,9 @@ def run_followup_turn(
         st.session_state.show_hint_button = False
         st.session_state.show_solution_button = False
 
-    st.session_state.chat_history.append({
-        "role": "assistant",
-        "content": response
-    })
+    st.session_state.chat_history.append(
+        {"role": "assistant", "content": response}
+    )
 
 
 def get_child_help_response_settings():
@@ -502,7 +575,7 @@ def get_child_help_response_settings():
 
 
 # =========================================================
-# APP
+# APP UI
 # =========================================================
 if "dang_nhap_thanh_cong" not in st.session_state:
     st.session_state.dang_nhap_thanh_cong = False
@@ -536,7 +609,7 @@ else:
     mode_label = st.radio(
         "Chế độ",
         options=["Con học cùng app", "Ba mẹ dạy con"],
-        horizontal=True
+        horizontal=True,
     )
     st.session_state.mode = "child" if mode_label == "Con học cùng app" else "parent"
 
@@ -550,7 +623,7 @@ else:
         "Mức hỗ trợ",
         options=list(support_map.keys()),
         index=0,
-        horizontal=True
+        horizontal=True,
     )
 
     st.session_state.support_level = support_map[support_label]
@@ -562,14 +635,14 @@ else:
 
     uploaded_file = st.file_uploader(
         "Tải ảnh đề bài (nếu có)",
-        type=["png", "jpg", "jpeg"]
+        type=["png", "jpg", "jpeg"],
     )
 
     typed_problem = st.text_area(
         "Hoặc gõ đề bài vào đây",
-        value=st.session_state.problem_text if not st.session_state.problem_confirmed else "",
+        value="" if st.session_state.problem_confirmed else st.session_state.problem_text,
         height=140,
-        placeholder="Ví dụ: Lan có 24 quyển vở, mẹ mua thêm cho Lan 8 quyển nữa. Hỏi Lan có tất cả bao nhiêu quyển vở?"
+        placeholder="Ví dụ: Lan có 24 quyển vở, mẹ mua thêm cho Lan 8 quyển nữa. Hỏi Lan có tất cả bao nhiêu quyển vở?",
     )
 
     col_a, col_b = st.columns(2)
@@ -607,21 +680,24 @@ else:
         if st.session_state.pending_image is not None:
             st.info("App đã đọc ảnh theo 2 bước: OCR thô + trích dữ kiện có cấu trúc. Ba mẹ kiểm tra và sửa lại trước khi bắt đầu.")
 
+            structured = st.session_state.image_structured_data or {}
+            warnings = validate_structured_problem(
+                st.session_state.image_question_text,
+                st.session_state.image_data_text,
+                structured,
+            )
+
             col_img, col_data = st.columns([1, 1])
 
             with col_img:
                 st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
 
             with col_data:
-                structured = st.session_state.image_structured_data or {}
-
                 st.markdown("**Thông tin app đọc từ ảnh**")
-                st.write(f"- Loại ảnh: `{structured.get('image_type', 'unknown')}`")
-                if structured.get("confidence"):
-                    st.write(f"- Độ tự tin: `{structured.get('confidence')}`")
-
-                if st.session_state.image_missing_text:
-                    st.warning("Có phần app chưa chắc hoặc chưa đọc rõ. Ba mẹ nên kiểm tra kỹ.")
+                st.write(f"- Loại ảnh: `{image_type_label(structured.get('image_type', 'unknown'))}`")
+                st.write(f"- Mức tin cậy: `{confidence_label(structured.get('confidence_value'))}`")
+                st.write(f"- Số dữ kiện trích được: `{len(structured.get('diagram_entities', [])) + len(structured.get('geometry_labels', []))}`")
+                st.write(f"- Có lựa chọn A/B/C/D: `{'Có' if structured.get('options') else 'Không'}`")
 
                 with st.expander("Xem OCR thô"):
                     st.text_area(
@@ -629,51 +705,51 @@ else:
                         value=st.session_state.image_raw_ocr_text,
                         height=180,
                         disabled=True,
-                        key="raw_ocr_view"
+                        key="raw_ocr_view",
                     )
 
+            if warnings:
+                for warning in warnings:
+                    st.warning(warning)
+
             st.markdown("### Sửa dữ kiện đã đọc")
+
             st.session_state.image_question_text = st.text_area(
                 "Câu hỏi / phần đề chữ",
                 value=st.session_state.image_question_text,
                 height=120,
-                key="image_question_text_editor"
+                key="image_question_text_editor",
             )
 
             st.session_state.image_data_text = st.text_area(
                 "Dữ kiện / nhãn / số đo đọc từ ảnh",
                 value=st.session_state.image_data_text,
                 height=180,
-                key="image_data_text_editor"
+                key="image_data_text_editor",
             )
 
             st.session_state.image_options_text = st.text_area(
                 "Các lựa chọn A/B/C/D (nếu có)",
                 value=st.session_state.image_options_text,
                 height=120,
-                key="image_options_text_editor"
+                key="image_options_text_editor",
             )
 
             st.session_state.image_missing_text = st.text_area(
                 "Phần chưa rõ từ ảnh (có thể để trống)",
                 value=st.session_state.image_missing_text,
                 height=80,
-                key="image_missing_text_editor"
+                key="image_missing_text_editor",
             )
 
             col_merge, col_keep = st.columns(2)
             with col_merge:
                 if st.button("Ghép lại đề từ dữ kiện ảnh 🔄"):
-                    st.session_state.confirm_problem_text = build_problem_text_from_image_fields(
-                        question_text=st.session_state.image_question_text,
-                        data_text=st.session_state.image_data_text,
-                        options_text=st.session_state.image_options_text,
-                        missing_text=st.session_state.image_missing_text,
-                    )
+                    rebuild_confirm_text_from_fields()
                     st.rerun()
 
             with col_keep:
-                st.caption("Ba mẹ có thể sửa trực tiếp ở ô bên dưới nếu muốn.")
+                st.caption("Sau khi sửa các ô bên trên, bấm nút ghép lại để cập nhật đề cuối cùng.")
 
         else:
             st.info("Ba mẹ kiểm tra lại đề bài trước khi bắt đầu.")
@@ -681,18 +757,24 @@ else:
         st.text_area(
             "Đề bài cuối cùng sẽ dùng để dạy",
             value=st.session_state.confirm_problem_text,
-            height=220,
-            key="confirm_problem_text"
+            height=240,
+            key="confirm_problem_text",
         )
 
         col_c, col_d = st.columns(2)
 
         with col_c:
             if st.button("Đúng rồi ✅"):
-                st.session_state.problem_text = st.session_state.confirm_problem_text.strip()
-                st.session_state.problem_confirmed = True
-                start_problem_session()
-                st.rerun()
+                final_text = st.session_state.confirm_problem_text.strip()
+                if "[Ảnh chưa có đủ câu hỏi rõ ràng." in final_text:
+                    st.error("Ảnh chưa có đủ câu hỏi rõ ràng. Ba mẹ hãy nhập thêm phần đề chữ trước khi bắt đầu.")
+                elif not final_text:
+                    st.error("Đề bài đang trống. Ba mẹ kiểm tra lại trước khi bắt đầu.")
+                else:
+                    st.session_state.problem_text = final_text
+                    st.session_state.problem_confirmed = True
+                    start_problem_session()
+                    st.rerun()
 
         with col_d:
             if st.button("Lưu đề đã sửa ✏️"):
@@ -759,12 +841,12 @@ else:
             try:
                 summary_context = build_summary_context(
                     problem_text=st.session_state.problem_text,
-                    chat_history=st.session_state.chat_history
+                    chat_history=st.session_state.chat_history,
                 )
 
                 summary_text = generate_text_response(
                     system_prompt="Bạn là trợ lý tóm tắt buổi học Toán lớp 3 cho phụ huynh.",
-                    user_input=summary_context
+                    user_input=summary_context,
                 )
 
                 st.session_state.summary = summary_text
