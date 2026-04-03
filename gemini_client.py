@@ -1,41 +1,46 @@
 import os
 from typing import Optional
 
-import google.generativeai as genai
 from PIL import Image
-from openai import OpenAI
+
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover
+    OpenAI = None  # type: ignore
+
+try:
+    import google.generativeai as genai
+except Exception:  # pragma: no cover
+    genai = None
 
 
-# =========================================================
-# ENV / CONFIG
-# =========================================================
-def _get_openai_api_key() -> str:
-    return os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-
-def _get_gemini_api_key() -> str:
-    return os.getenv("GEMINI_API_KEY", "").strip()
-
-
-def _get_text_model_name(model: Optional[str] = None) -> str:
-    return model or os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini"
-
-
-def _get_vision_model_name(model: Optional[str] = None) -> str:
-    return model or os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+DEFAULT_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
+DEFAULT_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-pro")
 
 
 # =========================================================
 # OPENAI (TEXT / TUTORING)
 # =========================================================
 def _get_openai_client() -> OpenAI:
-    api_key = _get_openai_api_key()
-    if not api_key:
+    global OpenAI
+    if OpenAI is None:
+        try:
+            from openai import OpenAI as _OpenAI  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Thiếu thư viện openai. Hãy cài dependency rồi chạy lại app."
+            ) from exc
+        OpenAI = _OpenAI
+
+    if not OPENAI_API_KEY:
         raise RuntimeError(
             "Chưa tìm thấy OPENAI_API_KEY. "
             "Hãy đặt biến môi trường OPENAI_API_KEY trước khi chạy app."
         )
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=OPENAI_API_KEY)
 
 
 def _extract_openai_text(response) -> str:
@@ -61,13 +66,22 @@ def _extract_openai_text(response) -> str:
 # GEMINI (VISION / IMAGE READING)
 # =========================================================
 def _ensure_gemini_ready() -> None:
-    api_key = _get_gemini_api_key()
-    if not api_key:
+    global genai
+    if genai is None:
+        try:
+            import google.generativeai as _genai  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Thiếu thư viện google-generativeai. Hãy cài dependency rồi chạy lại app."
+            ) from exc
+        genai = _genai
+
+    if not GEMINI_API_KEY:
         raise RuntimeError(
             "Chưa tìm thấy GEMINI_API_KEY. "
             "Hãy đặt biến môi trường GEMINI_API_KEY trước khi chạy app."
         )
-    genai.configure(api_key=api_key)
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 def _prepare_image(image: Image.Image) -> Image.Image:
@@ -109,7 +123,7 @@ def generate_text_response(
     Dùng OpenAI cho phần text reasoning / tutoring.
     """
     client = _get_openai_client()
-    model_name = _get_text_model_name(model)
+    model_name = model or DEFAULT_TEXT_MODEL
 
     response = client.responses.create(
         model=model_name,
@@ -152,7 +166,7 @@ def generate_multimodal_response(
     Dùng Gemini cho phần đọc ảnh / OCR / trích dữ kiện từ ảnh.
     """
     _ensure_gemini_ready()
-    model_name = _get_vision_model_name(model)
+    model_name = model or DEFAULT_VISION_MODEL
     safe_image = _prepare_image(image)
 
     model_client = genai.GenerativeModel(model_name)
@@ -170,19 +184,5 @@ def generate_multimodal_response(
     text = _extract_gemini_text(response)
     if text:
         return text
-
-    retry_response = model_client.generate_content(
-        [
-            f"[SYSTEM]\n{system_prompt}\n[/SYSTEM]",
-            user_input + "\n\nChỉ trả về đúng nội dung cần thiết, không để trống.",
-            safe_image,
-        ],
-        generation_config={
-            "temperature": 0.0,
-        },
-    )
-    retry_text = _extract_gemini_text(retry_response)
-    if retry_text:
-        return retry_text
 
     raise RuntimeError("Gemini trả về rỗng ở bước generate_multimodal_response.")
