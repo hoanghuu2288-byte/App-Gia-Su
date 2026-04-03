@@ -18,6 +18,7 @@ from logic import (
     start_new_problem,
     should_require_full_presentation,
     update_presentation_retry,
+    should_mark_finished_after_child_help,
 )
 
 
@@ -238,3 +239,27 @@ def test_update_presentation_retry():
 
     update_presentation_retry(st, False)
     assert st.session_state.presentation_retry_count == 0
+
+
+def test_classify_user_reply_choice_letter_variants():
+    assert classify_user_reply("d") == "normal_reply"
+    assert classify_user_reply("D.") == "normal_reply"
+    assert classify_user_reply("đáp án d") == "normal_reply"
+
+
+def test_detect_finished_response_true_with_knowledge_line_and_full_answer():
+    text = (
+        "Thầy nói thẳng: **78 000 - 54 000 = 24 000**.\n\n"
+        "Bác Hùng còn phải mua **24 000 viên gạch** nữa.\n\n"
+        "Kiến thức cần nhớ: Tìm số còn lại thì lấy số dự tính trừ số đã có."
+    )
+    assert detect_finished_response(text) is True
+
+
+def test_should_mark_finished_after_child_help_true_after_many_hints():
+    text = (
+        "Thầy nói thẳng: **78 000 - 54 000 = 24 000**.\n\n"
+        "Bác Hùng còn phải mua **24 000 viên gạch** nữa.\n\n"
+        "Kiến thức cần nhớ: Tìm số còn lại thì lấy số dự tính trừ số đã có."
+    )
+    assert should_mark_finished_after_child_help(text, hint_request_count=3) is True
