@@ -14,7 +14,7 @@ import google.generativeai as genai
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from eval_cases import EvalCase, get_eval_cases
+from eval_cases import EvalCase, TurnSpec, get_eval_cases
 from prompts import get_system_prompt
 from logic import (
     build_initial_context,
@@ -36,8 +36,9 @@ class EvalResult:
     mode: str
     category: str
     passed: bool
-    checks_passed: int
-    checks_total: int
+    score: int
+    max_score: int
+    pass_ratio: float
     failed_checks: List[str]
     opening_response: str
     final_response: str
@@ -87,19 +88,44 @@ def get_child_help_response_settings(st):
     return "goi_y", False
 
 
-def contains_all(text: str, needles: List[str]):
-    missing = [item for item in needles if item not in text]
+def has_all(text: str, items: List[str]):
+    missing = [item for item in items if item not in text]
     return len(missing) == 0, missing
 
 
-def contains_none(text: str, needles: List[str]):
-    found = [item for item in needles if item in text]
+def has_none(text: str, items: List[str]):
+    found = [item for item in items if item in text]
     return len(found) == 0, found
+
+
+def score_block(label: str, text: str, must_have: List[str], must_not_have: List[str], failed_checks: List[str]):
+    score = 0
+    max_score = 0
+
+    for item in must_have:
+        max_score += 1
+        if item in text:
+            score += 1
+        else:
+            failed_checks.append(f"{label} thiếu: {item}")
+
+    for item in must_not_have:
+        max_score += 1
+        if item not in text:
+            score += 1
+        else:
+            failed_checks.append(f"{label} có cụm không mong muốn: {item}")
+
+    return score, max_score
 
 
 def run_case(case: EvalCase, model_name: str) -> EvalResult:
     st = DummyStreamlit(support_level=case.support_level)
     system_prompt = get_system_prompt(case.mode)
+
+    failed_checks: List[str] = []
+    total_score = 0
+    total_max = 0
 
     opening_context = build_initial_context(
         problem_text=case.problem,
@@ -108,34 +134,25 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
     )
     opening_response = call_model(system_prompt, opening_context, model_name=model_name)
 
+    score, max_score = score_block(
+        label="opening",
+        text=opening_response,
+        must_have=case.opening_must_have,
+        must_not_have=case.opening_must_not_have,
+        failed_checks=failed_checks,
+    )
+    total_score += score
+    total_max += max_score
+
     chat_history = [{"role": "assistant", "content": opening_response}]
     st.session_state.is_finished = detect_finished_response(opening_response)
-
-    failed_checks = []
-    checks_total = 0
-    checks_passed = 0
-
-    checks_total += 1
-    ok, missing = contains_all(opening_response, case.opening_must_have)
-    if ok:
-        checks_passed += 1
-    else:
-        failed_checks.append(f"opening thiếu: {missing}")
-
-    checks_total += 1
-    ok, found = contains_none(opening_response, case.opening_must_not_have)
-    if ok:
-        checks_passed += 1
-    else:
-        failed_checks.append(f"opening có cụm không mong muốn: {found}")
-
     last_response = opening_response
 
-    for turn in case.student_turns:
+    for idx, turn in enumerate(case.turns, start=1):
         if st.session_state.is_finished:
             break
 
-        if turn == "__HINT__":
+        if turn.user == "__HINT__":
             user_reply = "con cần gợi ý thêm"
             reply_type = "student_dont_know"
 
@@ -163,73 +180,86 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
                 stuck_count=st.session_state.stuck_count,
                 is_finished=st.session_state.is_finished,
             )
+        else:
+            if looks_like_new_problem(turn.user):
+                failed_checks.append(f"turn {idx} bị hiểu như bài mới giữa chừng")
+                break
 
-            last_response = call_model(system_prompt, followup_context, model_name=model_name)
-            chat_history.append({"role": "assistant", "content": last_response})
-            st.session_state.is_finished = detect_finished_response(last_response)
-            continue
+            chat_history.append({"role": "user", "content": turn.user})
 
-        if looks_like_new_problem(turn):
-            failed_checks.append("case bị hiểu như bài mới giữa chừng")
-            break
+            reply_type = classify_user_reply(turn.user)
+            update_step_and_error(st, reply_type)
+            update_stuck_ui(st, reply_type)
 
-        chat_history.append({"role": "user", "content": turn})
+            require_full_presentation = should_require_full_presentation(st, turn.user)
+            update_presentation_retry(st, require_full_presentation)
+            small_error = is_small_error(turn.user)
 
-        reply_type = classify_user_reply(turn)
-        update_step_and_error(st, reply_type)
-        update_stuck_ui(st, reply_type)
-
-        require_full_presentation = should_require_full_presentation(st, turn)
-        update_presentation_retry(st, require_full_presentation)
-        small_error = is_small_error(turn)
-
-        followup_context = build_followup_context(
-            problem_text=case.problem,
-            mode=case.mode,
-            support_level=case.support_level,
-            chat_history=chat_history,
-            current_step=st.session_state.current_step,
-            last_error_type=st.session_state.last_error_type,
-            user_input=turn,
-            reply_type=reply_type,
-            allow_full_solution=st.session_state.allow_full_solution,
-            require_full_presentation=require_full_presentation,
-            small_error=small_error,
-            stuck_count=st.session_state.stuck_count,
-            is_finished=st.session_state.is_finished,
-        )
+            followup_context = build_followup_context(
+                problem_text=case.problem,
+                mode=case.mode,
+                support_level=case.support_level,
+                chat_history=chat_history,
+                current_step=st.session_state.current_step,
+                last_error_type=st.session_state.last_error_type,
+                user_input=turn.user,
+                reply_type=reply_type,
+                allow_full_solution=st.session_state.allow_full_solution,
+                require_full_presentation=require_full_presentation,
+                small_error=small_error,
+                stuck_count=st.session_state.stuck_count,
+                is_finished=st.session_state.is_finished,
+            )
 
         last_response = call_model(system_prompt, followup_context, model_name=model_name)
         chat_history.append({"role": "assistant", "content": last_response})
         st.session_state.is_finished = detect_finished_response(last_response)
 
+        score, max_score = score_block(
+            label=f"turn_{idx}",
+            text=last_response,
+            must_have=turn.must_have,
+            must_not_have=turn.must_not_have,
+            failed_checks=failed_checks,
+        )
+        total_score += score
+        total_max += max_score
+
     all_assistant_text = "\n".join(
         msg["content"] for msg in chat_history if msg["role"] == "assistant"
     )
 
-    checks_total += 1
-    ok, missing = contains_all(all_assistant_text, case.final_must_have)
-    if ok:
-        checks_passed += 1
-    else:
-        failed_checks.append(f"final thiếu: {missing}")
+    score, max_score = score_block(
+        label="transcript",
+        text=all_assistant_text,
+        must_have=case.transcript_must_have,
+        must_not_have=case.transcript_must_not_have,
+        failed_checks=failed_checks,
+    )
+    total_score += score
+    total_max += max_score
 
-    checks_total += 1
-    ok, found = contains_none(all_assistant_text, case.final_must_not_have)
-    if ok:
-        checks_passed += 1
-    else:
-        failed_checks.append(f"final có cụm không mong muốn: {found}")
+    score, max_score = score_block(
+        label="final",
+        text=all_assistant_text,
+        must_have=case.final_must_have,
+        must_not_have=case.final_must_not_have,
+        failed_checks=failed_checks,
+    )
+    total_score += score
+    total_max += max_score
 
-    passed = len(failed_checks) == 0
+    pass_ratio = (total_score / total_max) if total_max else 1.0
+    passed = pass_ratio >= case.min_pass_ratio
 
     return EvalResult(
         case_id=case.id,
         mode=case.mode,
         category=case.category,
         passed=passed,
-        checks_passed=checks_passed,
-        checks_total=checks_total,
+        score=total_score,
+        max_score=total_max,
+        pass_ratio=pass_ratio,
         failed_checks=failed_checks,
         opening_response=opening_response,
         final_response=last_response,
@@ -246,8 +276,9 @@ def write_csv(results: List[EvalResult], output_path: Path):
                 "mode",
                 "category",
                 "passed",
-                "checks_passed",
-                "checks_total",
+                "score",
+                "max_score",
+                "pass_ratio",
                 "failed_checks",
             ]
         )
@@ -258,8 +289,9 @@ def write_csv(results: List[EvalResult], output_path: Path):
                     r.mode,
                     r.category,
                     "PASS" if r.passed else "FAIL",
-                    r.checks_passed,
-                    r.checks_total,
+                    r.score,
+                    r.max_score,
+                    f"{r.pass_ratio:.2f}",
                     " | ".join(r.failed_checks),
                 ]
             )
@@ -271,31 +303,53 @@ def write_markdown(results: List[EvalResult], output_path: Path, model_name: str
     passed = sum(1 for r in results if r.passed)
     total = len(results)
 
+    by_mode = {}
+    by_category = {}
+    for r in results:
+        by_mode.setdefault(r.mode, []).append(r)
+        by_category.setdefault(r.category, []).append(r)
+
     lines = [
-        "# Live Eval Report",
+        "# Live Eval Report V2",
         "",
         f"- Model: **{model_name}**",
         f"- Time: **{datetime.now().isoformat(timespec='seconds')}**",
         f"- Passed: **{passed}/{total}**",
         "",
-        "## Kết quả theo case",
+        "## Tổng hợp theo mode",
         "",
     ]
+
+    for mode, items in by_mode.items():
+        mode_pass = sum(1 for r in items if r.passed)
+        lines.append(f"- **{mode}**: {mode_pass}/{len(items)}")
+    lines.append("")
+    lines.append("## Tổng hợp theo category")
+    lines.append("")
+    for category, items in sorted(by_category.items()):
+        cat_pass = sum(1 for r in items if r.passed)
+        lines.append(f"- **{category}**: {cat_pass}/{len(items)}")
+    lines.append("")
+    lines.append("## Chi tiết từng case")
+    lines.append("")
 
     for r in results:
         status = "✅ PASS" if r.passed else "❌ FAIL"
         lines.append(f"### {status} — {r.case_id}")
         lines.append(f"- Mode: `{r.mode}`")
         lines.append(f"- Category: `{r.category}`")
-        lines.append(f"- Checks: `{r.checks_passed}/{r.checks_total}`")
+        lines.append(f"- Score: `{r.score}/{r.max_score}`")
+        lines.append(f"- Pass ratio: `{r.pass_ratio:.2f}`")
         if r.failed_checks:
-            lines.append(f"- Failed checks: {', '.join(r.failed_checks)}")
+            lines.append("- Failed checks:")
+            for item in r.failed_checks:
+                lines.append(f"  - {item}")
         lines.append("")
         lines.append("**Opening response**")
         lines.append("")
         lines.append(r.opening_response)
         lines.append("")
-        lines.append("**Final response**")
+        lines.append("**Last response**")
         lines.append("")
         lines.append(r.final_response)
         lines.append("")
@@ -308,7 +362,7 @@ def write_markdown(results: List[EvalResult], output_path: Path, model_name: str
 def main():
     configure_gemini_from_env()
 
-    model_name = "gemini-2.5-pro"
+    model_name = os.getenv("EVAL_MODEL_NAME", "gemini-2.5-pro")
     cases = get_eval_cases()
     results = []
 
@@ -316,12 +370,12 @@ def main():
         print(f"[{idx}/{len(cases)}] Running {case.id} ...")
         result = run_case(case, model_name=model_name)
         results.append(result)
-        print(f"    -> {'PASS' if result.passed else 'FAIL'}")
+        print(f"    -> {'PASS' if result.passed else 'FAIL'} ({result.score}/{result.max_score}, ratio={result.pass_ratio:.2f})")
 
     outdir = Path("eval_reports")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = outdir / f"live_eval_{timestamp}.csv"
-    md_path = outdir / f"live_eval_{timestamp}.md"
+    csv_path = outdir / f"live_eval_v2_{timestamp}.csv"
+    md_path = outdir / f"live_eval_v2_{timestamp}.md"
 
     write_csv(results, csv_path)
     write_markdown(results, md_path, model_name=model_name)
