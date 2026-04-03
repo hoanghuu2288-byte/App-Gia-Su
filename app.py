@@ -27,6 +27,9 @@ from logic import (
     detect_finished_response,
     normalize_user_input,
     responses_too_similar,
+    should_mark_finished_after_child_help,
+    generate_opening_tutoring_response,
+    generate_followup_tutoring_response,
 )
 
 st.set_page_config(
@@ -647,16 +650,22 @@ def maybe_retry_non_repeating_response(
 def start_problem_session():
     reset_learning_flow()
 
-    initial_context = build_initial_context(
+    response = generate_opening_tutoring_response(
         problem_text=st.session_state.problem_text,
         mode=st.session_state.mode,
         support_level=st.session_state.support_level,
     )
 
-    response = generate_text_response(
-        system_prompt=get_system_prompt(st.session_state.mode),
-        user_input=initial_context,
-    )
+    if response is None:
+        initial_context = build_initial_context(
+            problem_text=st.session_state.problem_text,
+            mode=st.session_state.mode,
+            support_level=st.session_state.support_level,
+        )
+        response = generate_text_response(
+            system_prompt=get_system_prompt(st.session_state.mode),
+            user_input=initial_context,
+        )
 
     st.session_state.is_finished = detect_finished_response(response)
     append_chat_message("assistant", response)
@@ -702,13 +711,11 @@ def run_followup_turn(
         else allow_full_solution_override
     )
 
-    followup_context = build_followup_context(
+    response = generate_followup_tutoring_response(
         problem_text=st.session_state.problem_text,
         mode=st.session_state.mode,
         support_level=support_level_for_response,
         chat_history=st.session_state.chat_history,
-        current_step=st.session_state.current_step,
-        last_error_type=st.session_state.last_error_type,
         user_input=normalized_user_reply,
         reply_type=reply_type,
         allow_full_solution=allow_full_solution_for_response,
@@ -716,22 +723,42 @@ def run_followup_turn(
         small_error=small_error,
         stuck_count=st.session_state.stuck_count,
         is_finished=st.session_state.is_finished,
+        hint_request_count=st.session_state.hint_request_count if st.session_state.mode == "child" else 0,
     )
 
+    forced_finished = False
     system_prompt = get_system_prompt(st.session_state.mode)
-    response = generate_text_response(
-        system_prompt=system_prompt,
-        user_input=followup_context,
-    )
 
-    response, forced_finished = maybe_retry_non_repeating_response(
-        response=response,
-        system_prompt=system_prompt,
-        followup_context=followup_context,
-        reply_type=reply_type,
-        support_level_for_response=support_level_for_response,
-        allow_full_solution_for_response=allow_full_solution_for_response,
-    )
+    if response is None:
+        followup_context = build_followup_context(
+            problem_text=st.session_state.problem_text,
+            mode=st.session_state.mode,
+            support_level=support_level_for_response,
+            chat_history=st.session_state.chat_history,
+            current_step=st.session_state.current_step,
+            last_error_type=st.session_state.last_error_type,
+            user_input=normalized_user_reply,
+            reply_type=reply_type,
+            allow_full_solution=allow_full_solution_for_response,
+            require_full_presentation=require_full_presentation,
+            small_error=small_error,
+            stuck_count=st.session_state.stuck_count,
+            is_finished=st.session_state.is_finished,
+        )
+
+        response = generate_text_response(
+            system_prompt=system_prompt,
+            user_input=followup_context,
+        )
+
+        response, forced_finished = maybe_retry_non_repeating_response(
+            response=response,
+            system_prompt=system_prompt,
+            followup_context=followup_context,
+            reply_type=reply_type,
+            support_level_for_response=support_level_for_response,
+            allow_full_solution_for_response=allow_full_solution_for_response,
+        )
 
     st.session_state.is_finished = (
         forced_finished
@@ -836,7 +863,7 @@ else:
         placeholder="Ví dụ: Lan có 24 quyển vở, mẹ mua thêm cho Lan 8 quyển nữa. Hỏi Lan có tất cả bao nhiêu quyển vở?",
     )
 
-    col_a, col_b = st.columns(2)
+    col_a, col_b, col_c_tools = st.columns(3)
 
     with col_a:
         if st.button("Bắt đầu bài này ✨"):
@@ -861,6 +888,11 @@ else:
     with col_b:
         if st.button("Làm bài mới 🧹"):
             reset_session(st)
+            clear_image_state()
+            st.rerun()
+
+    with col_c_tools:
+        if st.button("Xóa ảnh hiện tại 🖼️"):
             clear_image_state()
             st.rerun()
 
@@ -981,6 +1013,16 @@ else:
         if st.session_state.pending_image is not None:
             with st.expander("Xem lại ảnh gốc của bài này"):
                 _ = st.image(st.session_state.pending_image, caption="Ảnh gốc", use_container_width=True)
+
+        col_retry, col_clear_chat = st.columns(2)
+        with col_retry:
+            if st.button("Làm lại bài này 🔁"):
+                start_problem_session()
+                st.rerun()
+        with col_clear_chat:
+            if st.button("Xóa cuộc hội thoại bài này 🧼"):
+                reset_learning_flow()
+                st.rerun()
 
         for message in st.session_state.chat_history:
             if message.get("hidden"):
