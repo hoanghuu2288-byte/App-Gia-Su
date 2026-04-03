@@ -231,6 +231,32 @@ def get_eval_cases() -> List[EvalCase]:
             final_must_have=["6", "chai", "Kiến thức cần nhớ"],
         ),
 
+        EvalCase(
+            id="child_geometry_from_image_01",
+            mode="child",
+            category="geometry_from_image",
+            problem="""Câu 4: (1 điểm) Cho hình vẽ. Từ vị trí ong vàng đến vườn hoa nào là xa nhất?
+
+Dữ kiện nhìn thấy trong hình:
+- Đường đến Vườn hoa hồng: 42890 m
+- Đường đến Vườn hoa lan: 35000 m
+- Đường đến Vườn hoa cúc: 45050 m
+- Đường đến Vườn hoa hướng dương: 25090 m
+
+Các lựa chọn:
+A. Vườn hoa hồng
+B. Vườn hoa lan
+C. Vườn hoa cúc
+D. Vườn hoa hướng dương""",
+            opening_must_have=["Dạng bài", "Kiến thức dùng", "Cách nghĩ nhanh"],
+            turns=[
+                TurnSpec(user="__HINT__", must_have=["xa nhất"]),
+                TurnSpec(user="C", must_have=["Vườn hoa cúc"]),
+            ],
+            transcript_must_have=["45050", "Vườn hoa cúc"],
+            final_must_have=["Vườn hoa cúc", "Kiến thức cần nhớ"],
+        ),
+
         # =====================================================
         # PARENT MODE
         # =====================================================
@@ -273,6 +299,28 @@ def get_eval_cases() -> List[EvalCase]:
             opening_must_not_have=["con nhé", "Con làm phép tính gì nào"],
             transcript_must_have=["24", "cm"],
             final_must_have=["24", "cm"],
+        ),
+        EvalCase(
+            id="parent_geometry_from_image_01",
+            mode="parent",
+            category="geometry_from_image",
+            problem="""Câu 4: (1 điểm) Cho hình vẽ. Từ vị trí ong vàng đến vườn hoa nào là xa nhất?
+
+Dữ kiện nhìn thấy trong hình:
+- Đường đến Vườn hoa hồng: 42890 m
+- Đường đến Vườn hoa lan: 35000 m
+- Đường đến Vườn hoa cúc: 45050 m
+- Đường đến Vườn hoa hướng dương: 25090 m
+
+Các lựa chọn:
+A. Vườn hoa hồng
+B. Vườn hoa lan
+C. Vườn hoa cúc
+D. Vườn hoa hướng dương""",
+            opening_must_have=["Dạng bài", "Kiến thức dùng", "Hướng làm cả bài", "Ba mẹ nên hỏi con"],
+            opening_must_not_have=["con nhé", "Con làm phép tính gì nào"],
+            transcript_must_have=["45 050", "Vườn hoa cúc"],
+            final_must_have=["Vườn hoa cúc"],
         ),
     ]
 
