@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from eval_cases import EvalCase, get_eval_cases
 from gemini_client import generate_text_response
 from prompts import get_system_prompt
+from gemini_client import generate_text_response
 from logic import (
     build_initial_context,
     build_followup_context,
@@ -26,6 +27,8 @@ from logic import (
     is_small_error,
     update_stuck_ui,
     detect_finished_response,
+    generate_opening_tutoring_response,
+    generate_followup_tutoring_response,
 )
 
 
@@ -55,6 +58,7 @@ class DummyStreamlit:
             last_error_type="",
             allow_full_solution=(support_level == "cach_giai"),
             current_step="start",
+            hint_request_count=0,
         )
 
 
@@ -116,12 +120,18 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
     total_score = 0
     total_max = 0
 
-    opening_context = build_initial_context(
+    opening_response = generate_opening_tutoring_response(
         problem_text=case.problem,
         mode=case.mode,
         support_level=case.support_level,
     )
-    opening_response = call_model(system_prompt, opening_context, model_name=model_name)
+    if opening_response is None:
+        opening_context = build_initial_context(
+            problem_text=case.problem,
+            mode=case.mode,
+            support_level=case.support_level,
+        )
+        opening_response = call_model(system_prompt, opening_context, model_name=model_name)
 
     score, max_score = score_block(
         label="opening",
@@ -142,7 +152,8 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
             break
 
         if turn.user == "__HINT__":
-            user_reply = "con cần gợi ý thêm"
+            st.session_state.hint_request_count += 1
+            user_reply = f"con cần gợi ý thêm lần {st.session_state.hint_request_count}"
             reply_type = "student_dont_know"
 
             update_step_and_error(st, reply_type)
@@ -154,13 +165,11 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
             small_error = False
             update_presentation_retry(st, require_full_presentation)
 
-            followup_context = build_followup_context(
+            response = generate_followup_tutoring_response(
                 problem_text=case.problem,
                 mode=case.mode,
                 support_level=support_level_for_response,
                 chat_history=chat_history,
-                current_step=st.session_state.current_step,
-                last_error_type=st.session_state.last_error_type,
                 user_input=user_reply,
                 reply_type=reply_type,
                 allow_full_solution=allow_full_solution_for_response,
@@ -168,8 +177,27 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
                 small_error=small_error,
                 stuck_count=st.session_state.stuck_count,
                 is_finished=st.session_state.is_finished,
+                hint_request_count=st.session_state.hint_request_count,
             )
+            if response is None:
+                followup_context = build_followup_context(
+                    problem_text=case.problem,
+                    mode=case.mode,
+                    support_level=support_level_for_response,
+                    chat_history=chat_history,
+                    current_step=st.session_state.current_step,
+                    last_error_type=st.session_state.last_error_type,
+                    user_input=user_reply,
+                    reply_type=reply_type,
+                    allow_full_solution=allow_full_solution_for_response,
+                    require_full_presentation=require_full_presentation,
+                    small_error=small_error,
+                    stuck_count=st.session_state.stuck_count,
+                    is_finished=st.session_state.is_finished,
+                )
+                response = call_model(system_prompt, followup_context, model_name=model_name)
         else:
+            st.session_state.hint_request_count = 0
             if looks_like_new_problem(turn.user):
                 failed_checks.append(f"turn {idx} bị hiểu như bài mới giữa chừng")
                 break
@@ -184,13 +212,11 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
             update_presentation_retry(st, require_full_presentation)
             small_error = is_small_error(turn.user)
 
-            followup_context = build_followup_context(
+            response = generate_followup_tutoring_response(
                 problem_text=case.problem,
                 mode=case.mode,
                 support_level=case.support_level,
                 chat_history=chat_history,
-                current_step=st.session_state.current_step,
-                last_error_type=st.session_state.last_error_type,
                 user_input=turn.user,
                 reply_type=reply_type,
                 allow_full_solution=st.session_state.allow_full_solution,
@@ -198,9 +224,27 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
                 small_error=small_error,
                 stuck_count=st.session_state.stuck_count,
                 is_finished=st.session_state.is_finished,
+                hint_request_count=0,
             )
+            if response is None:
+                followup_context = build_followup_context(
+                    problem_text=case.problem,
+                    mode=case.mode,
+                    support_level=case.support_level,
+                    chat_history=chat_history,
+                    current_step=st.session_state.current_step,
+                    last_error_type=st.session_state.last_error_type,
+                    user_input=turn.user,
+                    reply_type=reply_type,
+                    allow_full_solution=st.session_state.allow_full_solution,
+                    require_full_presentation=require_full_presentation,
+                    small_error=small_error,
+                    stuck_count=st.session_state.stuck_count,
+                    is_finished=st.session_state.is_finished,
+                )
+                response = call_model(system_prompt, followup_context, model_name=model_name)
 
-        last_response = call_model(system_prompt, followup_context, model_name=model_name)
+        last_response = response
         chat_history.append({"role": "assistant", "content": last_response})
         st.session_state.is_finished = detect_finished_response(last_response)
 
