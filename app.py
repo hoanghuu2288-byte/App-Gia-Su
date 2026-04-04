@@ -284,6 +284,20 @@ def confidence_label(conf_value):
     return "Thấp"
 
 
+
+
+def _is_noise_value(value: str) -> bool:
+    value = str(value or "").strip().lower()
+    return value in {"none", "none none", "null", "nan", "khong ro", "[khong doc ro]"}
+
+
+def _clean_piece(value: str) -> str:
+    value = str(value or "").strip()
+    if not value or _is_noise_value(value):
+        return ""
+    return value
+
+
 def normalize_structured_data(raw_data, raw_ocr_text):
     if not isinstance(raw_data, dict):
         return {
@@ -322,12 +336,15 @@ def build_default_data_text(data):
     lines = []
 
     if data.get("diagram_entities"):
-        lines.append("Dữ kiện nhìn thấy trong hình:")
+        rows = []
         for ent in data["diagram_entities"]:
-            name = ent.get("name", "")
-            value = ent.get("value", "")
-            unit = ent.get("unit", "")
-            relation = ent.get("relation", "")
+            name = _clean_piece(ent.get("name", ""))
+            value = _clean_piece(ent.get("value", ""))
+            unit = _clean_piece(ent.get("unit", ""))
+            relation = _clean_piece(ent.get("relation", ""))
+
+            if not name:
+                continue
 
             row = f"- {name}"
             if value:
@@ -336,17 +353,22 @@ def build_default_data_text(data):
                 row += f" {unit}"
             if relation:
                 row += f" ({relation})"
-            lines.append(row)
+            rows.append(row)
+
+        if rows:
+            lines.append("Dữ kiện nhìn thấy trong hình:")
+            lines.extend(rows)
 
     if data.get("geometry_labels"):
-        if lines:
-            lines.append("")
-        lines.append("Nhãn hình học nhìn thấy:")
+        rows = []
         for ent in data["geometry_labels"]:
-            obj = ent.get("object", "")
-            label = ent.get("label", "")
-            value = ent.get("value", "")
-            unit = ent.get("unit", "")
+            obj = _clean_piece(ent.get("object", ""))
+            label = _clean_piece(ent.get("label", ""))
+            value = _clean_piece(ent.get("value", ""))
+            unit = _clean_piece(ent.get("unit", ""))
+
+            if not obj:
+                continue
 
             row = f"- {obj}"
             if label:
@@ -355,12 +377,20 @@ def build_default_data_text(data):
                 row += f": {value}"
             if unit:
                 row += f" {unit}"
-            lines.append(row)
+            rows.append(row)
+
+        if rows:
+            if lines:
+                lines.append("")
+            lines.append("Nhãn hình học nhìn thấy:")
+            lines.extend(rows)
 
     if not lines and data.get("visible_text"):
-        lines.append("Chữ/số nhìn thấy trong ảnh:")
-        for line in data["visible_text"]:
-            lines.append(f"- {line}")
+        clean_visible = [line for line in data["visible_text"] if _clean_piece(line)]
+        if clean_visible:
+            lines.append("Chữ/số nhìn thấy trong ảnh:")
+            for line in clean_visible:
+                lines.append(f"- {line}")
 
     return "\n".join(lines).strip()
 
