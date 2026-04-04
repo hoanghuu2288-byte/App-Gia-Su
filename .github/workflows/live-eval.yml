@@ -6,40 +6,34 @@ on:
 jobs:
   live-eval:
     runs-on: ubuntu-latest
-
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_TEXT_MODEL: ${{ secrets.OPENAI_TEXT_MODEL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_VISION_MODEL: ${{ secrets.GEMINI_VISION_MODEL }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
-      - name: Run live eval with current text model
-        id: live_eval
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_TEXT_MODEL: ${{ secrets.OPENAI_TEXT_MODEL }}
-          LIVE_EVAL_TEXT_MODEL: ${{ secrets.OPENAI_TEXT_MODEL }}
-        run: |
-          python scripts/run_live_eval.py
-        continue-on-error: true
+      - name: Run Live Eval
+        run: python scripts/run_live_eval.py
 
-      - name: Upload eval reports
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: live-eval-reports
-          path: eval_reports/
-
-      - name: Fail workflow if eval failed
-        if: steps.live_eval.outcome == 'failure'
-        run: |
-          echo "Live eval có case fail. Tải artifact để xem chi tiết."
-          exit 1
+          name: live-eval-report
+          path: artifacts/
+          if-no-files-found: warn
