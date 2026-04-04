@@ -535,19 +535,19 @@ def build_child_hint_request_message(hint_count: int) -> str:
     if hint_count <= 1:
         return (
             "Con cần thêm một gợi ý ngắn. "
-            "Hãy nhắc thật tự nhiên con nên nhìn vào đâu trước, rồi hỏi đúng 1 câu ngắn."
+            "Hãy nhắc tự nhiên con nên nhìn vào đâu trước, rồi hỏi đúng 1 câu ngắn."
         )
 
     if hint_count == 2:
         return (
             "Con vẫn đang bí. "
-            "Hãy nói rõ hơn bước cần làm hoặc phép tính cần nhìn, nhưng vẫn giữ giọng thầy giáo lớp 3 tự nhiên."
+            "Hãy nói rõ hơn bước cần làm, nhưng vẫn giữ giọng thầy giáo lớp 3 tự nhiên."
         )
 
     return (
         f"Con vẫn đang bí sau {hint_count} lần gợi ý. "
         "Có thể nói thẳng bước tính hoặc kết quả trung gian cần có, rồi mời con chốt tiếp. "
-        "Không dùng giọng robot và không lặp nguyên câu trước."
+        "Đừng dùng giọng robot và đừng lặp nguyên câu trước."
     )
 
 
@@ -711,6 +711,8 @@ def run_followup_turn(
         mode=st.session_state.mode,
         support_level=support_level_for_response,
         chat_history=st.session_state.chat_history,
+        current_step=st.session_state.current_step,
+        last_error_type=st.session_state.last_error_type,
         user_input=normalized_user_reply,
         reply_type=reply_type,
         allow_full_solution=allow_full_solution_for_response,
