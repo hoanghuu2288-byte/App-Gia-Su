@@ -534,20 +534,20 @@ def get_recent_assistant_responses(limit: int = 3):
 def build_child_hint_request_message(hint_count: int) -> str:
     if hint_count <= 1:
         return (
-            "Con cần gợi ý thêm lần 1. "
-            "Nhắc rất ngắn con đang ở bước nào, rồi hỏi đúng 1 phép tính cụ thể cần làm."
+            "Con cần thêm một gợi ý ngắn. "
+            "Hãy nhắc thật tự nhiên con nên nhìn vào đâu trước, rồi hỏi đúng 1 câu ngắn."
         )
 
     if hint_count == 2:
         return (
-            "Con cần gợi ý thêm lần 2. "
-            "Không hỏi lại chung chung. Nói thẳng phép tính cần viết ở bước này, rất ngắn gọn."
+            "Con vẫn đang bí. "
+            "Hãy nói rõ hơn bước cần làm hoặc phép tính cần nhìn, nhưng vẫn giữ giọng thầy giáo lớp 3 tự nhiên."
         )
 
     return (
-        f"Con cần gợi ý thêm lần {hint_count}. "
-        "Không được hỏi lại nữa. Không được lặp ý cũ. "
-        "Hãy nói thẳng phép tính hoặc kết quả còn thiếu, rồi chốt câu trả lời ngắn gọn và thêm 1 dòng Kiến thức cần nhớ."
+        f"Con vẫn đang bí sau {hint_count} lần gợi ý. "
+        "Có thể nói thẳng bước tính hoặc kết quả trung gian cần có, rồi mời con chốt tiếp. "
+        "Không dùng giọng robot và không lặp nguyên câu trước."
     )
 
 
@@ -577,22 +577,15 @@ def maybe_retry_non_repeating_response(
 
     if support_level_for_response == "goi_y":
         stronger_support_level = "tung_buoc"
-    elif support_level_for_response == "tung_buoc":
+    elif support_level_for_response == "tung_buoc" and hint_count >= 3:
         stronger_support_level = "cach_giai"
         stronger_allow_full_solution = True
 
-    if hint_count >= 3:
-        stronger_support_level = "cach_giai"
-        stronger_allow_full_solution = True
-
-    retry_instruction = build_child_hint_request_message(max(2, hint_count))
-    if hint_count >= 3:
-        retry_instruction = (
-            f"Con cần gợi ý thêm lần {hint_count} nhưng câu trước vẫn bị lặp. "
-            "Không được hỏi lại nữa. Không được lặp ý cũ. "
-            "Hãy nói thẳng: 1) phép tính hoặc kết quả còn thiếu, 2) câu trả lời đầy đủ thật ngắn, 3) 1 dòng Kiến thức cần nhớ. "
-            "Kết thúc bằng lời chốt, không kết thúc bằng câu hỏi."
-        )
+    retry_instruction = (
+        f"Con vừa nghe một gợi ý hơi giống câu trước. Hãy nói lại theo cách tự nhiên hơn, "
+        f"đổi góc gợi ý, ngắn gọn hơn, hợp giọng thầy giáo lớp 3. "
+        f"Không lặp nguyên câu cũ. {build_child_hint_request_message(max(1, hint_count))}"
+    )
 
     stronger_context = build_followup_context(
         problem_text=st.session_state.problem_text,
@@ -617,7 +610,10 @@ def maybe_retry_non_repeating_response(
 
     retry_repetitive = any(responses_too_similar(previous, retry_response) for previous in recent_responses)
     if not retry_repetitive:
-        return retry_response, hint_count >= 3 and stronger_allow_full_solution
+        return retry_response, False
+
+    if hint_count < 4:
+        return retry_response, False
 
     forced_final_context = build_followup_context(
         problem_text=st.session_state.problem_text,
@@ -627,16 +623,15 @@ def maybe_retry_non_repeating_response(
         current_step=st.session_state.current_step,
         last_error_type=st.session_state.last_error_type,
         user_input=(
-            "Con vẫn đang bí sau nhiều lượt gợi ý và các câu trước đang bị lặp. "
-            "Không hỏi thêm nữa. Không nhắc lại dữ kiện dài dòng. "
-            "Hãy nói thẳng phép tính hoặc kết quả còn thiếu, chốt đáp án đầy đủ thật ngắn, rồi thêm 1 dòng Kiến thức cần nhớ. "
-            "Bắt buộc không kết thúc bằng câu hỏi."
+            "Con vẫn đang bí sau rất nhiều lượt gợi ý. "
+            "Giữ giọng tự nhiên như thầy giáo lớp 3. "
+            "Hãy nói thẳng bước tính hoặc kết quả trung gian cần có, rồi chốt ngắn gọn nếu cần."
         ),
         reply_type=reply_type,
         allow_full_solution=True,
         require_full_presentation=False,
         small_error=False,
-        stuck_count=max(st.session_state.stuck_count, 3),
+        stuck_count=max(st.session_state.stuck_count, 4),
         is_finished=False,
     )
 
