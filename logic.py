@@ -365,6 +365,115 @@ def _build_step_plan(problem_text: str, frame: dict[str, str]) -> list[str]:
 
 
 
+def _text_mentions_number(text: str, value: int) -> bool:
+    compact = _compact_number_text(text)
+    return str(value) in compact if compact else False
+
+
+def _build_micro_goals(problem_text: str) -> list[str]:
+    solved = _solve_supported_problem(problem_text)
+    if solved and solved.get("kind") == "geometry_farthest":
+        return [
+            "Tìm số đo lớn nhất trong các khoảng cách.",
+            "Nối số đo lớn nhất với đúng tên vườn hoa.",
+            "Chốt đáp án chữ cái tương ứng.",
+        ]
+    if solved and solved.get("kind") == "circle_mcq":
+        return [
+            "Nhìn đúng khái niệm đang hỏi trong 4 lựa chọn.",
+            "Loại các câu sai nếu cần.",
+            "Chọn đáp án đúng và nói vì sao ngắn gọn.",
+        ]
+    if solved and solved.get("category") == "doi_don_vi":
+        return [
+            "Đổi số đo về cùng một đơn vị trước.",
+            "Làm phép tính sau khi đã đổi đơn vị.",
+            "Chốt đáp số đầy đủ đơn vị.",
+        ]
+    if solved and solved.get("category") == "rut_ve_don_vi":
+        return [
+            "Tìm 1 phần trước.",
+            "Từ 1 phần suy ra nhiều phần.",
+            "Chốt đáp số đầy đủ.",
+        ]
+    if solved and solved.get("category") == "chia_deu":
+        return [
+            "Viết phép chia để tìm 1 phần.",
+            "Nói đáp số đầy đủ.",
+        ]
+    if solved and solved.get("category") == "nhan_roi_tru":
+        return [
+            "Tính bước trung gian trước.",
+            "Dùng kết quả đó để tìm phần còn lại hoặc còn thiếu.",
+            "Chốt đáp số đầy đủ.",
+        ]
+    if solved and solved.get("category") in {"so_lien_sau", "so_lien_truoc"}:
+        return [
+            "Làm phép tính ngắn đúng quy tắc.",
+            "Chốt đáp án cuối cùng.",
+        ]
+    frame = _infer_teaching_frame(problem_text)
+    return _build_step_plan(problem_text, frame)
+
+
+def _infer_active_micro_goal(problem_text: str, chat_history: list[dict[str, Any]]) -> dict[str, Any]:
+    solved = _solve_supported_problem(problem_text)
+    joined = "\n".join(msg.get("content", "") for msg in chat_history if not msg.get("hidden"))
+    goals = _build_micro_goals(problem_text)
+
+    def pack(index: int) -> dict[str, Any]:
+        index = max(0, min(index, len(goals) - 1))
+        return {"index": index, "text": goals[index], "total": len(goals)}
+
+    if not solved:
+        return pack(0)
+
+    if solved.get("kind") == "geometry_farthest":
+        if not _text_mentions_number(joined, solved["correct_value"]):
+            return pack(0)
+        if not _contains_name(joined, solved["correct_name"]):
+            return pack(1)
+        if _response_mentions_choice(joined) != solved["correct_letter"]:
+            return pack(2)
+        return pack(len(goals) - 1)
+
+    if solved.get("kind") == "circle_mcq":
+        if _response_mentions_choice(joined) != solved["correct_letter"] and not _contains_name(joined, solved["correct_name"]):
+            return pack(0)
+        return pack(len(goals) - 1)
+
+    steps = solved.get("step_values", {})
+    category = solved.get("category")
+    if category == "doi_don_vi":
+        if not _text_mentions_number(joined, steps.get("converted", -1)):
+            return pack(0)
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(1)
+        return pack(2)
+    if category == "rut_ve_don_vi":
+        if not _text_mentions_number(joined, steps.get("one_part", -1)):
+            return pack(0)
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(1)
+        return pack(2)
+    if category == "nhan_roi_tru":
+        if not _text_mentions_number(joined, steps.get("intermediate", -1)):
+            return pack(0)
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(1)
+        return pack(2)
+    if category == "chia_deu":
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(0)
+        return pack(1 if len(goals) > 1 else 0)
+    if category in {"so_lien_sau", "so_lien_truoc", "tim_thanh_phan_chua_biet"}:
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(0)
+        return pack(len(goals) - 1)
+
+    return pack(0)
+
+
 def detect_problem_complexity(problem_text: str) -> str:
     text = (problem_text or "").lower()
     multi_step_signals = [
@@ -830,6 +939,7 @@ def _solve_numeric_problem(problem_text: str) -> dict[str, Any] | None:
             "unit": unit,
             "answer_text": f"{_format_int(answer)} {unit}".strip(),
             "memory": "Chia đều thì lấy tổng chia cho số phần bằng nhau.",
+            "step_values": {"main": answer},
         }
 
     if frame["problem_type"] == "Rút về đơn vị":
@@ -856,6 +966,7 @@ def _solve_numeric_problem(problem_text: str) -> dict[str, Any] | None:
             "unit": unit,
             "answer_text": f"{_format_int(answer)} {unit}".strip(),
             "memory": "Muốn tìm nhiều phần như nhau thì tìm 1 phần trước rồi nhân lên.",
+            "step_values": {"one_part": one_part, "target": target},
         }
 
     if frame["problem_type"] == "Đổi đơn vị rồi tính":
@@ -877,6 +988,7 @@ def _solve_numeric_problem(problem_text: str) -> dict[str, Any] | None:
             "unit": "cm",
             "answer_text": f"{_format_int(answer)} cm",
             "memory": "Đổi về cùng đơn vị trước rồi mới tính.",
+            "step_values": {"converted": total_cm, "change": change_cm},
         }
 
     if frame["problem_type"] == "Chu vi hình vuông" and numbers:
@@ -910,7 +1022,8 @@ def _solve_numeric_problem(problem_text: str) -> dict[str, Any] | None:
         }
 
     if "78 000" in problem_text and "18 000" in problem_text and "3 lần" in problem_text:
-        answer = 78000 - 3 * 18000
+        purchased = 3 * 18000
+        answer = 78000 - purchased
         return {
             "kind": "numeric",
             "category": "nhan_roi_tru",
@@ -921,6 +1034,23 @@ def _solve_numeric_problem(problem_text: str) -> dict[str, Any] | None:
             "unit": "viên gạch",
             "answer_text": f"{_format_int(answer)} viên gạch",
             "memory": "Tính phần đã có trước rồi tìm phần còn thiếu.",
+            "step_values": {"intermediate": purchased},
+        }
+
+    if "95" in problem_text and ("5 chồng" in problem_text or "5 chong" in normalized) and "7 quyển" in problem_text:
+        sold = 5 * 7
+        answer = 95 - sold
+        return {
+            "kind": "numeric",
+            "category": "nhan_roi_tru",
+            "problem_type": "Bài nhiều bước",
+            "knowledge": "Tính số đã bán trước rồi lấy số ban đầu trừ đi",
+            "thinking": "Tính xem đã bán bao nhiêu quyển trước, rồi tìm số còn lại",
+            "answer_value": answer,
+            "unit": "quyển vở",
+            "answer_text": f"{_format_int(answer)} quyển vở",
+            "memory": "Muốn biết còn lại bao nhiêu thì lấy số ban đầu trừ số đã bán.",
+            "step_values": {"intermediate": sold},
         }
 
     if frame["problem_type"] == "Tìm thành phần chưa biết" and len(numbers) >= 2:
@@ -1006,7 +1136,7 @@ def build_initial_context(problem_text: str, mode: str, support_level: str) -> s
     first_response_guide = get_first_response_guide()
     complexity = detect_problem_complexity(problem_text)
     frame = _infer_teaching_frame(problem_text)
-    step_plan = _build_step_plan(problem_text, frame)
+    micro_goals = _build_micro_goals(problem_text)
 
     context = f"""
 {system_prompt}
@@ -1023,28 +1153,22 @@ Phân tích nội bộ để định hướng cho thầy:
 - Dạng bài gợi ý: {frame['problem_type']}
 - Kiến thức dùng gợi ý: {frame['knowledge']}
 - Cách nghĩ nhanh gợi ý: {frame['thinking']}
-- Các ý chính nên đi qua:
-{chr(10).join(f"  - {step}" for step in step_plan)}
+- Các mốc nên đi qua:
+{chr(10).join(f"  - {step}" for step in micro_goals)}
 {_format_truth_block(problem_text)}
 
 Yêu cầu cho lượt đầu:
 - Nếu mode là child:
-  - Nói như một thầy giáo lớp 3 tận tụy, câu ngắn, ấm, không máy móc.
-  - Không dùng kiểu robot như: "Đang ở bước 1", "Con đang ở bước...".
-  - Mở đầu theo đúng tinh thần dạy tư duy:
-    - Dạng bài: ...
-    - Kiến thức dùng: ...
-    - Cách nghĩ nhanh: ...
-  - Sau đó chỉ hỏi đúng 1 câu ngắn để con làm bước đầu tiên.
-  - Không lộ đáp án cuối ở lượt đầu, trừ mode cách giải.
-  - Viết sao cho đọc thành tiếng vẫn tự nhiên.
+  - Mở đầu đúng 1 lần theo khung: Dạng bài / Kiến thức dùng / Cách nghĩ nhanh.
+  - Sau đó chỉ hỏi 1 câu ngắn để con làm bước đầu tiên.
+  - Đừng lộ đáp án cuối ở lượt đầu, trừ mode cách giải.
+  - Giữ giọng ấm, ngắn, tự nhiên, hợp audio.
 - Nếu mode là parent:
   - Trả lời theo kiểu toàn bài, gọn mà đủ dùng ngay.
   - Luôn có các ý: Dạng bài, Kiến thức dùng, Hướng làm cả bài, Lỗi dễ mắc, Ba mẹ nên hỏi con.
   - Nếu đã biết đáp án chắc, ưu tiên thêm Lời giải mẫu ngắn và Đáp số.
 """
     return context.strip()
-
 
 
 def build_followup_context(
@@ -1065,42 +1189,43 @@ def build_followup_context(
     system_prompt = get_system_prompt(mode)
     support_guide = get_support_guide(support_level)
     frame = _infer_teaching_frame(problem_text)
-    step_plan = _build_step_plan(problem_text, frame)
+    active_goal = _infer_active_micro_goal(problem_text, chat_history)
+    micro_goals = _build_micro_goals(problem_text)
 
     reply_rules = []
     if reply_type == "student_dont_know":
         reply_rules.extend(
             [
                 f"- Con đang bí. stuck_count hiện tại: {stuck_count}.",
-                "- Đừng nói cứng như máy. Nhắc thật ngắn con nên nhìn vào đâu trước.",
-                "- stuck_count = 1: gợi ý nhẹ một ý then chốt rồi hỏi tiếp.",
-                "- stuck_count = 2: nói rõ hơn bước cần làm hoặc phép tính cần nhìn.",
-                "- stuck_count >= 3: được phép nói thẳng bước tính hoặc kết quả trung gian cần có.",
+                f"- Tập trung vào đúng mốc hiện tại: {active_goal['text']}",
+                "- Lần bí đầu: nhắc con nên nhìn vào đâu trước.",
+                "- Lần bí tiếp theo: nói rõ hơn bước cần làm.",
+                "- Bí nhiều lượt mới được nói thẳng phép tính hoặc kết quả trung gian.",
             ]
         )
     elif reply_type == "student_asks_answer":
         reply_rules.extend(
             [
                 "- Con đang xin đáp án.",
-                "- Nếu chưa đến mức giải luôn, vẫn ưu tiên dạy cách làm trước.",
-                "- Nhưng đừng vòng vo: nếu con đã bí nhiều lượt thì nói rõ đường đi ngắn nhất tới kết quả.",
+                f"- Trước khi chốt, ưu tiên giúp con đi qua mốc hiện tại: {active_goal['text']}",
+                "- Nếu con đã bí quá nhiều lượt thì mới nói đường đi ngắn nhất tới kết quả.",
             ]
         )
     elif reply_type in {"student_number_only", "student_choice_only"}:
         reply_rules.extend(
             [
                 "- Con đã đưa ra một mảnh trả lời ngắn.",
-                "- Nếu ý đó đúng hướng, công nhận ngắn gọn rồi ghép thành câu trả lời rõ hơn.",
+                "- Nếu đúng hướng thì công nhận ngắn gọn rồi đi tiếp hoặc chốt gọn.",
                 "- Không bắt con viết lại quá nhiều lần.",
             ]
         )
     else:
-        reply_rules.append("- Bám đúng đề hiện tại và phản ứng tự nhiên như gia sư thật.")
+        reply_rules.append(f"- Bám vào mốc hiện tại: {active_goal['text']}")
 
     if require_full_presentation:
-        reply_rules.append("- Có thể nhắc con viết rõ hơn, nhưng chỉ nhắc ngắn một lần.")
+        reply_rules.append("- Chỉ nhắc viết rõ hơn thật ngắn một lần.")
     if small_error:
-        reply_rules.append("- Đây là lỗi nhỏ. Công nhận điều đúng trước, sửa phần thiếu thật ngắn.")
+        reply_rules.append("- Đây là lỗi nhỏ. Công nhận phần đúng trước, sửa phần thiếu thật ngắn.")
     if allow_full_solution:
         reply_rules.append("- Được phép nói lời giải rõ hơn hoặc chốt đáp án nếu cần.")
     if is_finished:
@@ -1128,17 +1253,18 @@ Phân tích nội bộ để giữ đường ray:
 - Dạng bài gợi ý: {frame['problem_type']}
 - Kiến thức dùng gợi ý: {frame['knowledge']}
 - Cách nghĩ nhanh gợi ý: {frame['thinking']}
-- Các ý chính nên đi qua:
-{chr(10).join(f"  - {step}" for step in step_plan)}
+- Mốc hiện tại nên tập trung: {active_goal['text']}
+- Toàn bộ mốc của bài:
+{chr(10).join(f"  - {step}" for step in micro_goals)}
 {_format_truth_block(problem_text)}
 
 Luật phản hồi cho lượt này:
 {chr(10).join(reply_rules)}
 - Nếu mode là child:
+  - Không lặp lại block mở bài "Dạng bài / Kiến thức dùng / Cách nghĩ nhanh" nữa.
   - Nói như thầy giáo lớp 3: ngắn, mềm, rõ.
-  - Không dùng câu robot kiểu "Đang ở bước 1" hoặc lặp lại nguyên câu cũ.
   - Mỗi lượt chỉ 1 việc chính.
-  - Nếu con đã đúng ý chính, chuyển nhanh sang bước tiếp theo hoặc chốt gọn.
+  - Không nhảy cóc qua mốc hiện tại nếu con chưa đi qua nó.
   - Nếu chốt đáp án, thêm 1 dòng: Kiến thức cần nhớ: ...
 - Nếu mode là parent:
   - Ưu tiên một lượt là dùng được ngay.
@@ -1149,7 +1275,6 @@ Tin nhắn mới nhất của người dùng:
 {user_input}
 """
     return context.strip()
-
 
 
 def build_summary_context(problem_text: str, chat_history: list) -> str:
@@ -1246,6 +1371,21 @@ def _safe_child_circle_answer(solved: dict[str, Any]) -> str:
 
 
 
+def _safe_child_numeric_step_prompt(solved: dict[str, Any]) -> str | None:
+    category = solved.get("category")
+    if category == "doi_don_vi":
+        converted = solved.get("step_values", {}).get("converted")
+        return (
+            "Thầy thấy mình cần làm từng bước nhé.\n\n"
+            "Con đổi 3 m 25 cm ra cm trước xem được bao nhiêu.\n"
+            "3 m 25 cm = ? cm"
+        ) if converted else None
+    if category == "rut_ve_don_vi":
+        return "Mình tìm 1 phần trước nhé. Con thử tính xem 1 hộp có bao nhiêu chiếc bút?"
+    if category == "nhan_roi_tru":
+        return "Mình tìm bước trung gian trước nhé. Con thử tính phần đã có hoặc đã bán trước xem sao."
+    return None
+
 def _apply_response_guardrails(
     response: str,
     problem_text: str,
@@ -1255,22 +1395,25 @@ def _apply_response_guardrails(
     reply_type: str = "normal_reply",
     allow_full_solution: bool = False,
     hint_request_count: int = 0,
+    chat_history: list[dict[str, Any]] | None = None,
 ) -> str:
     solved = _solve_supported_problem(problem_text)
     if not solved:
         return response.strip()
 
+    chat_history = chat_history or []
+
     if mode == "parent":
         return _maybe_append_parent_answer(response.strip(), solved)
+
+    active_goal = _infer_active_micro_goal(problem_text, chat_history)
 
     if solved["kind"] == "geometry_farthest":
         mention_choice = _response_mentions_choice(response)
         mentions_name = _contains_name(response, solved["correct_name"])
-        mentions_value = _compact_number_text(response) == str(solved["correct_value"]) or str(solved["correct_value"]) in _compact_number_text(response)
+        mentions_value = _text_mentions_number(response, solved["correct_value"])
         if opening:
             if mention_choice and mention_choice != solved["correct_letter"]:
-                return _safe_child_geometry_prompt(solved)
-            if mention_choice == solved["correct_letter"] and not allow_full_solution:
                 return _safe_child_geometry_prompt(solved)
             return response.strip()
         if mention_choice and mention_choice != solved["correct_letter"]:
@@ -1286,11 +1429,20 @@ def _apply_response_guardrails(
         mention_choice = _response_mentions_choice(response)
         if mention_choice and mention_choice != solved["correct_letter"]:
             return _safe_child_circle_answer(solved)
-        if not opening and hint_request_count >= 2:
-            return _safe_child_circle_answer(solved)
         return response.strip()
 
-    # Numeric guardrails: keep AI natural, only add safe completion when it already finished.
+    # numeric: keep AI natural, but do not let it jump over the current micro-goal too early.
+    if not opening and not allow_full_solution and reply_type in {"student_dont_know", "student_asks_answer"} and hint_request_count < 2:
+        category = solved.get("category")
+        if category == "doi_don_vi" and active_goal["index"] == 0 and _text_mentions_number(response, solved["answer_value"]):
+            safe = _safe_child_numeric_step_prompt(solved)
+            if safe:
+                return safe
+        if category in {"rut_ve_don_vi", "nhan_roi_tru"} and active_goal["index"] == 0 and _text_mentions_number(response, solved["answer_value"]):
+            safe = _safe_child_numeric_step_prompt(solved)
+            if safe:
+                return safe
+
     if detect_finished_response(response) and solved.get("answer_text"):
         compact = _compact_number_text(response)
         target = _compact_number_text(solved["answer_text"])
@@ -1299,9 +1451,6 @@ def _apply_response_guardrails(
     return response.strip()
 
 
-# =========================================================
-# MODEL ENTRYPOINTS (AI-FIRST)
-# =========================================================
 def generate_opening_tutoring_response(problem_text: str, mode: str, support_level: str) -> str | None:
     context = build_initial_context(problem_text, mode, support_level)
     response = generate_text_response(
@@ -1313,6 +1462,7 @@ def generate_opening_tutoring_response(problem_text: str, mode: str, support_lev
         problem_text=problem_text,
         mode=mode,
         opening=True,
+        chat_history=[],
     )
 
 
@@ -1322,6 +1472,8 @@ def generate_followup_tutoring_response(
     mode: str,
     support_level: str,
     chat_history: list,
+    current_step: str,
+    last_error_type: str,
     user_input: str,
     reply_type: str,
     allow_full_solution: bool,
@@ -1336,8 +1488,8 @@ def generate_followup_tutoring_response(
         mode=mode,
         support_level=support_level,
         chat_history=chat_history,
-        current_step="start",
-        last_error_type="",
+        current_step=current_step,
+        last_error_type=last_error_type,
         user_input=user_input,
         reply_type=reply_type,
         allow_full_solution=allow_full_solution,
@@ -1358,4 +1510,5 @@ def generate_followup_tutoring_response(
         reply_type=reply_type,
         allow_full_solution=allow_full_solution,
         hint_request_count=hint_request_count,
+        chat_history=chat_history,
     )
