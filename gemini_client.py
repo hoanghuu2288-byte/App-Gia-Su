@@ -4,66 +4,20 @@ from typing import Optional
 from PIL import Image
 
 try:
-    from openai import OpenAI
-except Exception:  # pragma: no cover
-    OpenAI = None  # type: ignore
-
-try:
     import google.generativeai as genai
 except Exception:  # pragma: no cover
     genai = None
 
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-DEFAULT_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
-DEFAULT_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
+# Full Gemini 2.5 Pro cho cả text và vision
+DEFAULT_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-pro")
+DEFAULT_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-pro")
 
 
 # =========================================================
-# OPENAI (TEXT / TUTORING)
-# =========================================================
-def _get_openai_client() -> OpenAI:
-    global OpenAI
-    if OpenAI is None:
-        try:
-            from openai import OpenAI as _OpenAI  # type: ignore
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError(
-                "Thiếu thư viện openai. Hãy cài dependency rồi chạy lại app."
-            ) from exc
-        OpenAI = _OpenAI
-
-    if not OPENAI_API_KEY:
-        raise RuntimeError(
-            "Chưa tìm thấy OPENAI_API_KEY. "
-            "Hãy đặt biến môi trường OPENAI_API_KEY trước khi chạy app."
-        )
-    return OpenAI(api_key=OPENAI_API_KEY)
-
-
-def _extract_openai_text(response) -> str:
-    text = getattr(response, "output_text", None)
-    if text:
-        return text.strip()
-
-    try:
-        parts = []
-        for item in response.output:
-            if getattr(item, "type", None) == "message":
-                for content in getattr(item, "content", []):
-                    if getattr(content, "type", None) == "output_text":
-                        value = getattr(content, "text", "")
-                        if value:
-                            parts.append(value)
-        return "\n".join(parts).strip()
-    except Exception:
-        return ""
-
-
-# =========================================================
-# GEMINI (VISION / IMAGE READING)
+# GEMINI SHARED
 # =========================================================
 def _ensure_gemini_ready() -> None:
     global genai
@@ -81,6 +35,7 @@ def _ensure_gemini_ready() -> None:
             "Chưa tìm thấy GEMINI_API_KEY. "
             "Hãy đặt biến môi trường GEMINI_API_KEY trước khi chạy app."
         )
+
     genai.configure(api_key=GEMINI_API_KEY)
 
 
@@ -120,40 +75,27 @@ def generate_text_response(
     model: Optional[str] = None,
 ) -> str:
     """
-    Dùng OpenAI cho phần text reasoning / tutoring.
+    Dùng Gemini cho phần text reasoning / tutoring.
     """
-    client = _get_openai_client()
+    _ensure_gemini_ready()
     model_name = model or DEFAULT_TEXT_MODEL
 
-    response = client.responses.create(
-        model=model_name,
-        input=[
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": system_prompt,
-                    }
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": user_input,
-                    }
-                ],
-            },
+    model_client = genai.GenerativeModel(model_name)
+    response = model_client.generate_content(
+        [
+            f"[SYSTEM]\n{system_prompt}\n[/SYSTEM]",
+            user_input,
         ],
+        generation_config={
+            "temperature": 0.2,
+        },
     )
 
-    text = _extract_openai_text(response)
+    text = _extract_gemini_text(response)
     if text:
         return text
 
-    raise RuntimeError("OpenAI trả về rỗng ở bước generate_text_response.")
+    raise RuntimeError("Gemini trả về rỗng ở bước generate_text_response.")
 
 
 def generate_multimodal_response(
