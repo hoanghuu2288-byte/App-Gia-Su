@@ -12,8 +12,8 @@ except Exception:  # pragma: no cover
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 # Full Gemini 2.5 Pro cho cả text và vision
-DEFAULT_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-pro")
-DEFAULT_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-pro")
+DEFAULT_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
+DEFAULT_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
 
 
 # =========================================================
