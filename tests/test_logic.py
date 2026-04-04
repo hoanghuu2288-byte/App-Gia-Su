@@ -5,9 +5,12 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from logic import (
+    _build_micro_goals,
     _extract_named_distances,
+    _infer_active_micro_goal,
     _solve_circle_mcq,
     _solve_geometry_farthest,
+    _solve_supported_problem,
     classify_user_reply,
     detect_finished_response,
     detect_problem_complexity,
@@ -200,3 +203,31 @@ def test_solve_circle_mcq_picks_center_option():
     assert solved is not None
     assert solved["correct_letter"] == "D"
     assert solved["correct_name"] == "O là tâm hình tròn"
+
+
+STORE_TEXT = """
+Một cửa hàng có 95 quyển vở. Người ta xếp đều vào 5 chồng, mỗi chồng lấy ra bán 7 quyển. Hỏi sau khi bán, cửa hàng còn lại bao nhiêu quyển vở?
+"""
+
+DOI_DON_VI_TEXT = """
+Một cuộn dây dài 3 m 25 cm, cắt đi 75 cm. Hỏi còn lại bao nhiêu xăng-ti-mét?
+"""
+
+
+def test_build_micro_goals_for_doi_don_vi():
+    goals = _build_micro_goals(DOI_DON_VI_TEXT)
+    assert goals[0].lower().startswith("đổi")
+    assert len(goals) >= 3
+
+
+def test_infer_active_micro_goal_for_doi_don_vi_history():
+    chat_history = [{"role": "assistant", "content": "Con đổi 3 m 25 cm ra 325 cm nhé.", "hidden": False}]
+    goal = _infer_active_micro_goal(DOI_DON_VI_TEXT, chat_history)
+    assert goal["index"] == 1
+
+
+def test_solve_supported_problem_for_store_case():
+    solved = _solve_supported_problem(STORE_TEXT)
+    assert solved is not None
+    assert solved["answer_value"] == 60
+    assert "quyển vở" in solved["answer_text"]
