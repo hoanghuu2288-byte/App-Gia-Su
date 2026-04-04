@@ -13,22 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from eval_cases import EvalCase, get_eval_cases
-from gemini_client import generate_text_response
-from prompts import get_system_prompt
-from gemini_client import generate_text_response
 from logic import (
-    build_initial_context,
-    build_followup_context,
     classify_user_reply,
-    update_step_and_error,
-    update_presentation_retry,
+    detect_finished_response,
+    generate_followup_tutoring_response,
+    generate_opening_tutoring_response,
+    is_small_error,
     looks_like_new_problem,
     should_require_full_presentation,
-    is_small_error,
+    update_presentation_retry,
+    update_step_and_error,
     update_stuck_ui,
-    detect_finished_response,
-    generate_opening_tutoring_response,
-    generate_followup_tutoring_response,
 )
 
 
@@ -58,37 +53,18 @@ class DummyStreamlit:
             last_error_type="",
             allow_full_solution=(support_level == "cach_giai"),
             current_step="start",
-            hint_request_count=0,
         )
-
-
-def call_model(system_prompt: str, user_input: str, model_name: str) -> str:
-    return generate_text_response(
-        system_prompt=system_prompt,
-        user_input=user_input,
-        model=model_name,
-    )
-
-
-def get_text_eval_model() -> str:
-    return (
-        os.getenv("LIVE_EVAL_TEXT_MODEL", "").strip()
-        or os.getenv("OPENAI_TEXT_MODEL", "").strip()
-        or "gpt-5.4-mini"
-    )
 
 
 def get_child_help_response_settings(st):
     if st.session_state.allow_full_solution:
         return "cach_giai", True
-
     if st.session_state.stuck_count >= 4:
         return "cach_giai", True
-
     if st.session_state.stuck_count >= 2:
         return "tung_buoc", False
-
     return "goi_y", False
+
 
 
 def score_block(label: str, text: str, must_have: List[str], must_not_have: List[str], failed_checks: List[str]):
@@ -112,9 +88,9 @@ def score_block(label: str, text: str, must_have: List[str], must_not_have: List
     return score, max_score
 
 
-def run_case(case: EvalCase, model_name: str) -> EvalResult:
+
+def run_case(case: EvalCase) -> EvalResult:
     st = DummyStreamlit(support_level=case.support_level)
-    system_prompt = get_system_prompt(case.mode)
 
     failed_checks: List[str] = []
     total_score = 0
@@ -125,13 +101,6 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
         mode=case.mode,
         support_level=case.support_level,
     )
-    if opening_response is None:
-        opening_context = build_initial_context(
-            problem_text=case.problem,
-            mode=case.mode,
-            support_level=case.support_level,
-        )
-        opening_response = call_model(system_prompt, opening_context, model_name=model_name)
 
     score, max_score = score_block(
         label="opening",
@@ -146,105 +115,54 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
     chat_history = [{"role": "assistant", "content": opening_response}]
     st.session_state.is_finished = detect_finished_response(opening_response)
     last_response = opening_response
+    hint_request_count = 0
 
     for idx, turn in enumerate(case.turns, start=1):
         if st.session_state.is_finished:
             break
 
         if turn.user == "__HINT__":
-            st.session_state.hint_request_count += 1
-            user_reply = f"con cần gợi ý thêm lần {st.session_state.hint_request_count}"
+            user_reply = "Con cần một gợi ý ngắn."
             reply_type = "student_dont_know"
+            hint_request_count += 1
 
             update_step_and_error(st, reply_type)
             update_stuck_ui(st, reply_type)
-
             support_level_for_response, allow_full_solution_for_response = get_child_help_response_settings(st)
 
             require_full_presentation = False
             small_error = False
             update_presentation_retry(st, require_full_presentation)
-
-            response = generate_followup_tutoring_response(
-                problem_text=case.problem,
-                mode=case.mode,
-                support_level=support_level_for_response,
-                chat_history=chat_history,
-                user_input=user_reply,
-                reply_type=reply_type,
-                allow_full_solution=allow_full_solution_for_response,
-                require_full_presentation=require_full_presentation,
-                small_error=small_error,
-                stuck_count=st.session_state.stuck_count,
-                is_finished=st.session_state.is_finished,
-                hint_request_count=st.session_state.hint_request_count,
-            )
-            if response is None:
-                followup_context = build_followup_context(
-                    problem_text=case.problem,
-                    mode=case.mode,
-                    support_level=support_level_for_response,
-                    chat_history=chat_history,
-                    current_step=st.session_state.current_step,
-                    last_error_type=st.session_state.last_error_type,
-                    user_input=user_reply,
-                    reply_type=reply_type,
-                    allow_full_solution=allow_full_solution_for_response,
-                    require_full_presentation=require_full_presentation,
-                    small_error=small_error,
-                    stuck_count=st.session_state.stuck_count,
-                    is_finished=st.session_state.is_finished,
-                )
-                response = call_model(system_prompt, followup_context, model_name=model_name)
         else:
-            st.session_state.hint_request_count = 0
             if looks_like_new_problem(turn.user):
                 failed_checks.append(f"turn {idx} bị hiểu như bài mới giữa chừng")
                 break
 
             chat_history.append({"role": "user", "content": turn.user})
-
+            user_reply = turn.user
             reply_type = classify_user_reply(turn.user)
             update_step_and_error(st, reply_type)
             update_stuck_ui(st, reply_type)
-
+            support_level_for_response = case.support_level
+            allow_full_solution_for_response = st.session_state.allow_full_solution
             require_full_presentation = should_require_full_presentation(st, turn.user)
             update_presentation_retry(st, require_full_presentation)
             small_error = is_small_error(turn.user)
 
-            response = generate_followup_tutoring_response(
-                problem_text=case.problem,
-                mode=case.mode,
-                support_level=case.support_level,
-                chat_history=chat_history,
-                user_input=turn.user,
-                reply_type=reply_type,
-                allow_full_solution=st.session_state.allow_full_solution,
-                require_full_presentation=require_full_presentation,
-                small_error=small_error,
-                stuck_count=st.session_state.stuck_count,
-                is_finished=st.session_state.is_finished,
-                hint_request_count=0,
-            )
-            if response is None:
-                followup_context = build_followup_context(
-                    problem_text=case.problem,
-                    mode=case.mode,
-                    support_level=case.support_level,
-                    chat_history=chat_history,
-                    current_step=st.session_state.current_step,
-                    last_error_type=st.session_state.last_error_type,
-                    user_input=turn.user,
-                    reply_type=reply_type,
-                    allow_full_solution=st.session_state.allow_full_solution,
-                    require_full_presentation=require_full_presentation,
-                    small_error=small_error,
-                    stuck_count=st.session_state.stuck_count,
-                    is_finished=st.session_state.is_finished,
-                )
-                response = call_model(system_prompt, followup_context, model_name=model_name)
-
-        last_response = response
+        last_response = generate_followup_tutoring_response(
+            problem_text=case.problem,
+            mode=case.mode,
+            support_level=support_level_for_response,
+            chat_history=chat_history,
+            user_input=user_reply,
+            reply_type=reply_type,
+            allow_full_solution=allow_full_solution_for_response,
+            require_full_presentation=require_full_presentation,
+            small_error=small_error,
+            stuck_count=st.session_state.stuck_count,
+            is_finished=st.session_state.is_finished,
+            hint_request_count=hint_request_count,
+        )
         chat_history.append({"role": "assistant", "content": last_response})
         st.session_state.is_finished = detect_finished_response(last_response)
 
@@ -258,9 +176,7 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
         total_score += score
         total_max += max_score
 
-    all_assistant_text = "\n".join(
-        msg["content"] for msg in chat_history if msg["role"] == "assistant"
-    )
+    all_assistant_text = "\n".join(msg["content"] for msg in chat_history if msg["role"] == "assistant")
 
     score, max_score = score_block(
         label="transcript",
@@ -299,119 +215,83 @@ def run_case(case: EvalCase, model_name: str) -> EvalResult:
     )
 
 
-def write_csv(results: List[EvalResult], output_path: Path):
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", newline="", encoding="utf-8-sig") as f:
+
+def main():
+    model_name = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
+    results = [run_case(case) for case in get_eval_cases()]
+
+    output_dir = ROOT / "artifacts"
+    output_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    csv_path = output_dir / f"live_eval_{timestamp}.csv"
+    md_path = output_dir / f"live_eval_{timestamp}.md"
+
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            [
-                "case_id",
-                "mode",
-                "category",
-                "passed",
-                "score",
-                "max_score",
-                "pass_ratio",
-                "failed_checks",
-            ]
-        )
+        writer.writerow([
+            "case_id", "mode", "category", "passed", "score", "max_score", "pass_ratio", "failed_checks"
+        ])
         for r in results:
-            writer.writerow(
-                [
-                    r.case_id,
-                    r.mode,
-                    r.category,
-                    "PASS" if r.passed else "FAIL",
-                    r.score,
-                    r.max_score,
-                    f"{r.pass_ratio:.2f}",
-                    " | ".join(r.failed_checks),
-                ]
-            )
+            writer.writerow([
+                r.case_id,
+                r.mode,
+                r.category,
+                r.passed,
+                r.score,
+                r.max_score,
+                f"{r.pass_ratio:.2f}",
+                " | ".join(r.failed_checks),
+            ])
 
-
-def write_markdown(results: List[EvalResult], output_path: Path, model_name: str):
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    passed = sum(1 for r in results if r.passed)
-    total = len(results)
-
+    passed_count = sum(1 for r in results if r.passed)
+    total_count = len(results)
     by_mode = {}
     by_category = {}
     for r in results:
-        by_mode.setdefault(r.mode, []).append(r)
-        by_category.setdefault(r.category, []).append(r)
+        by_mode.setdefault(r.mode, [0, 0])
+        by_mode[r.mode][1] += 1
+        by_mode[r.mode][0] += int(r.passed)
+        by_category.setdefault(r.category, [0, 0])
+        by_category[r.category][1] += 1
+        by_category[r.category][0] += int(r.passed)
 
-    lines = [
-        "# Live Eval Report V2",
-        "",
-        f"- Model: **{model_name}**",
-        f"- Time: **{datetime.now().isoformat(timespec='seconds')}**",
-        f"- Passed: **{passed}/{total}**",
-        "",
-        "## Tổng hợp theo mode",
-        "",
-    ]
+    with md_path.open("w", encoding="utf-8") as f:
+        f.write("# Live Eval Report V2\n\n")
+        f.write(f"- Model: **{model_name}**\n")
+        f.write(f"- Time: **{datetime.now().isoformat(timespec='seconds')}**\n")
+        f.write(f"- Passed: **{passed_count}/{total_count}**\n\n")
 
-    for mode, items in by_mode.items():
-        mode_pass = sum(1 for r in items if r.passed)
-        lines.append(f"- **{mode}**: {mode_pass}/{len(items)}")
-    lines.append("")
-    lines.append("## Tổng hợp theo category")
-    lines.append("")
-    for category, items in sorted(by_category.items()):
-        cat_pass = sum(1 for r in items if r.passed)
-        lines.append(f"- **{category}**: {cat_pass}/{len(items)}")
-    lines.append("")
-    lines.append("## Chi tiết từng case")
-    lines.append("")
+        f.write("## Tổng hợp theo mode\n\n")
+        for mode, (passed, total) in by_mode.items():
+            f.write(f"- **{mode}**: {passed}/{total}\n")
+        f.write("\n## Tổng hợp theo category\n\n")
+        for cat, (passed, total) in sorted(by_category.items()):
+            f.write(f"- **{cat}**: {passed}/{total}\n")
 
-    for r in results:
-        status = "✅ PASS" if r.passed else "❌ FAIL"
-        lines.append(f"### {status} — {r.case_id}")
-        lines.append(f"- Mode: `{r.mode}`")
-        lines.append(f"- Category: `{r.category}`")
-        lines.append(f"- Score: `{r.score}/{r.max_score}`")
-        lines.append(f"- Pass ratio: `{r.pass_ratio:.2f}`")
-        if r.failed_checks:
-            lines.append("- Failed checks:")
-            for item in r.failed_checks:
-                lines.append(f"  - {item}")
-        lines.append("")
-        lines.append("**Opening response**")
-        lines.append("")
-        lines.append(r.opening_response)
-        lines.append("")
-        lines.append("**Last response**")
-        lines.append("")
-        lines.append(r.final_response)
-        lines.append("")
-        lines.append("---")
-        lines.append("")
+        f.write("\n## Chi tiết từng case\n\n")
+        for r in results:
+            status = "✅ PASS" if r.passed else "❌ FAIL"
+            f.write(f"### {status} — {r.case_id}\n")
+            f.write(f"- Mode: `{r.mode}`\n")
+            f.write(f"- Category: `{r.category}`\n")
+            f.write(f"- Score: `{r.score}/{r.max_score}`\n")
+            f.write(f"- Pass ratio: `{r.pass_ratio:.2f}`\n")
+            if r.failed_checks:
+                f.write("- Failed checks:\n")
+                for item in r.failed_checks:
+                    f.write(f"  - {item}\n")
+            f.write("\n**Opening response**\n\n")
+            f.write(f"{r.opening_response}\n\n")
+            f.write("**Last response**\n\n")
+            f.write(f"{r.final_response}\n\n---\n\n")
 
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"Saved CSV report to: {csv_path}")
+    print(f"Saved Markdown report to: {md_path}")
+    print(f"Passed: {passed_count}/{total_count}")
 
-
-def main():
-    model_name = get_text_eval_model()
-    cases = get_eval_cases()
-    results = [run_case(case, model_name=model_name) for case in cases]
-
-    out_dir = ROOT / "eval_reports"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = out_dir / f"live_eval_{timestamp}.csv"
-    md_path = out_dir / f"live_eval_{timestamp}.md"
-
-    write_csv(results, csv_path)
-    write_markdown(results, md_path, model_name=model_name)
-
-    failed = [r for r in results if not r.passed]
-    print(f"Live Eval xong: {len(cases) - len(failed)}/{len(cases)} PASS")
-    print(f"CSV: {csv_path}")
-    print(f"MD : {md_path}")
-
-    if failed:
-        sys.exit(1)
+    if passed_count < total_count:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
