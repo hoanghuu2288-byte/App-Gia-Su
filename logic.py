@@ -643,20 +643,15 @@ def update_stuck_ui(st, reply_type: str):
 # =========================================================
 def detect_finished_response(response_text: str) -> bool:
     text = (response_text or "").lower()
-    direct_signals = [
+    strong_signals = [
         "đáp số:",
         "đáp án:",
         "đáp án đúng là",
-        "kiến thức cần nhớ:",
-        "vậy là con làm xong",
+        "vậy mình chốt lại",
         "con đã làm xong bài này",
-        "mình chốt lại nhé",
+        "kiến thức cần nhớ:",
     ]
-    if any(signal in text for signal in direct_signals):
-        return True
-    if "kiến thức cần nhớ" in text and any(token in text for token in ["đúng rồi", "vậy", "đáp án", "đáp số", "kết quả"]):
-        return True
-    return False
+    return any(signal in text for signal in strong_signals)
 
 
 
@@ -1137,6 +1132,11 @@ def build_initial_context(problem_text: str, mode: str, support_level: str) -> s
     complexity = detect_problem_complexity(problem_text)
     frame = _infer_teaching_frame(problem_text)
     micro_goals = _build_micro_goals(problem_text)
+    solved = _solve_supported_problem(problem_text)
+
+    truth_block = ""
+    if mode == "parent" or support_level == "cach_giai":
+        truth_block = _format_truth_block(problem_text)
 
     context = f"""
 {system_prompt}
@@ -1155,13 +1155,14 @@ Phân tích nội bộ để định hướng cho thầy:
 - Cách nghĩ nhanh gợi ý: {frame['thinking']}
 - Các mốc nên đi qua:
 {chr(10).join(f"  - {step}" for step in micro_goals)}
-{_format_truth_block(problem_text)}
+{truth_block}
 
 Yêu cầu cho lượt đầu:
 - Nếu mode là child:
   - Mở đầu đúng 1 lần theo khung: Dạng bài / Kiến thức dùng / Cách nghĩ nhanh.
   - Sau đó chỉ hỏi 1 câu ngắn để con làm bước đầu tiên.
-  - Đừng lộ đáp án cuối ở lượt đầu, trừ mode cách giải.
+  - Ở mode gợi ý nhẹ và dẫn từng bước: không lộ đáp án cuối, không tự làm hộ bước chính.
+  - Không nêu kết quả trung gian nếu con chưa thử làm, trừ khi đang ở mode cách giải.
   - Giữ giọng ấm, ngắn, tự nhiên, hợp audio.
 - Nếu mode là parent:
   - Trả lời theo kiểu toàn bài, gọn mà đủ dùng ngay.
@@ -1200,7 +1201,7 @@ def build_followup_context(
                 f"- Tập trung vào đúng mốc hiện tại: {active_goal['text']}",
                 "- Lần bí đầu: nhắc con nên nhìn vào đâu trước.",
                 "- Lần bí tiếp theo: nói rõ hơn bước cần làm.",
-                "- Bí nhiều lượt mới được nói thẳng phép tính hoặc kết quả trung gian.",
+                "- Chỉ khi bí nhiều lượt mới được nói thẳng phép tính hoặc kết quả trung gian.",
             ]
         )
     elif reply_type == "student_asks_answer":
@@ -1208,7 +1209,7 @@ def build_followup_context(
             [
                 "- Con đang xin đáp án.",
                 f"- Trước khi chốt, ưu tiên giúp con đi qua mốc hiện tại: {active_goal['text']}",
-                "- Nếu con đã bí quá nhiều lượt thì mới nói đường đi ngắn nhất tới kết quả.",
+                "- Nếu chưa ở mode cách giải, không chốt đáp án quá sớm.",
             ]
         )
     elif reply_type in {"student_number_only", "student_choice_only"}:
@@ -1230,6 +1231,10 @@ def build_followup_context(
         reply_rules.append("- Được phép nói lời giải rõ hơn hoặc chốt đáp án nếu cần.")
     if is_finished:
         reply_rules.append("- Bài đã xong. Chỉ chốt ngắn gọn, không mở thêm câu hỏi mới.")
+
+    truth_block = ""
+    if mode == "parent" or allow_full_solution:
+        truth_block = _format_truth_block(problem_text)
 
     context = f"""
 {system_prompt}
@@ -1256,7 +1261,7 @@ Phân tích nội bộ để giữ đường ray:
 - Mốc hiện tại nên tập trung: {active_goal['text']}
 - Toàn bộ mốc của bài:
 {chr(10).join(f"  - {step}" for step in micro_goals)}
-{_format_truth_block(problem_text)}
+{truth_block}
 
 Luật phản hồi cho lượt này:
 {chr(10).join(reply_rules)}
@@ -1265,6 +1270,7 @@ Luật phản hồi cho lượt này:
   - Nói như thầy giáo lớp 3: ngắn, mềm, rõ.
   - Mỗi lượt chỉ 1 việc chính.
   - Không nhảy cóc qua mốc hiện tại nếu con chưa đi qua nó.
+  - Ở mode gợi ý nhẹ hoặc dẫn từng bước: không tự giải hộ luôn bước chính, không chốt đáp án quá sớm.
   - Nếu chốt đáp án, thêm 1 dòng: Kiến thức cần nhớ: ...
 - Nếu mode là parent:
   - Ưu tiên một lượt là dùng được ngay.
@@ -1406,48 +1412,34 @@ def _apply_response_guardrails(
     if mode == "parent":
         return _maybe_append_parent_answer(response.strip(), solved)
 
-    active_goal = _infer_active_micro_goal(problem_text, chat_history)
+    # Child mode: ưu tiên giữ giọng dạy học, không ép solver cướp lời quá sớm.
+    if opening and not allow_full_solution:
+        return response.strip()
 
+    # Với trắc nghiệm hình học, chỉ sửa mạnh khi model lỡ chốt sai hẳn.
     if solved["kind"] == "geometry_farthest":
         mention_choice = _response_mentions_choice(response)
-        mentions_name = _contains_name(response, solved["correct_name"])
-        mentions_value = _text_mentions_number(response, solved["correct_value"])
-        if opening:
-            if mention_choice and mention_choice != solved["correct_letter"]:
-                return _safe_child_geometry_prompt(solved)
-            return response.strip()
-        if mention_choice and mention_choice != solved["correct_letter"]:
-            return _safe_child_geometry_answer(solved)
-        wrong_names = [opt["text"] for opt in solved["options"] if opt["letter"] != solved["correct_letter"]]
-        if any(_contains_name(response, name) for name in wrong_names) and not mentions_name:
-            return _safe_child_geometry_answer(solved)
-        if (mentions_value or mentions_name or mention_choice == solved["correct_letter"]) and hint_request_count >= 2:
+        if mention_choice and mention_choice != solved["correct_letter"] and (allow_full_solution or hint_request_count >= 2):
             return _safe_child_geometry_answer(solved)
         return response.strip()
 
     if solved["kind"] == "circle_mcq":
         mention_choice = _response_mentions_choice(response)
-        if mention_choice and mention_choice != solved["correct_letter"]:
+        if mention_choice and mention_choice != solved["correct_letter"] and (allow_full_solution or hint_request_count >= 2):
             return _safe_child_circle_answer(solved)
         return response.strip()
 
-    # numeric: keep AI natural, but do not let it jump over the current micro-goal too early.
-    if not opening and not allow_full_solution and reply_type in {"student_dont_know", "student_asks_answer"} and hint_request_count < 2:
-        category = solved.get("category")
-        if category == "doi_don_vi" and active_goal["index"] == 0 and _text_mentions_number(response, solved["answer_value"]):
-            safe = _safe_child_numeric_step_prompt(solved)
-            if safe:
-                return safe
-        if category in {"rut_ve_don_vi", "nhan_roi_tru"} and active_goal["index"] == 0 and _text_mentions_number(response, solved["answer_value"]):
-            safe = _safe_child_numeric_step_prompt(solved)
-            if safe:
-                return safe
-
-    if detect_finished_response(response) and solved.get("answer_text"):
-        compact = _compact_number_text(response)
-        target = _compact_number_text(solved["answer_text"])
-        if target and target not in compact:
-            return response.rstrip() + f"\n\nĐáp số: {solved['answer_text']}."
+    # Numeric: không tự đẩy đáp án ở gợi ý nhẹ / dẫn từng bước.
+    if mode == "child" and not allow_full_solution:
+        answer_digits = _compact_number_text(solved.get("answer_text", ""))
+        text_digits = _compact_number_text(response)
+        if opening and answer_digits and answer_digits in text_digits:
+            return response.strip().replace(solved.get("answer_text", ""), "")
+        if reply_type in {"student_dont_know", "student_asks_answer"} and hint_request_count < 2:
+            if answer_digits and answer_digits in text_digits:
+                step_prompt = _safe_child_numeric_step_prompt(solved)
+                if step_prompt:
+                    return step_prompt
     return response.strip()
 
 
