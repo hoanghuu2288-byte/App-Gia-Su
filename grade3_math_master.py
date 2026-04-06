@@ -252,3 +252,143 @@ def get_problem_blueprint(problem_type: str) -> dict:
 
 def list_all_problem_types() -> list[str]:
     return list(GRADE3_MATH_MASTER.keys())
+
+
+GRADE3_MATH_MASTER.update({
+    "one_step_division_word": {
+        "major_type": "word_problem_one_step",
+        "sub_type": "divide",
+        "label": "Bài toán có lời văn 1 bước - chia đều",
+        "keywords": ["chia đều", "mỗi khay", "mỗi hộp", "mỗi phần"],
+        "knowledge_used": "Phép chia",
+        "flow_type": "one_step_word_problem",
+        "show_plan_steps": False,
+        "plan_steps": [],
+        "multiple_choice_strategy": None,
+        "support_rules": {
+            "goi_y": "Chỉ nhắc lấy tổng số chia cho số phần.",
+            "tung_buoc": "Nhắc số nào chia cho số nào.",
+            "cach_giai": "Nêu phép chia và câu trả lời."
+        },
+        "common_errors": ["Dùng nhầm phép nhân"]
+    },
+    "perimeter_square": {
+        "major_type": "geometry_measurement",
+        "sub_type": "square_perimeter",
+        "label": "Chu vi hình vuông",
+        "keywords": ["chu vi hình vuông", "hình vuông có cạnh", "đoạn dây", "4 cạnh"],
+        "knowledge_used": "Lấy số đo 1 cạnh nhân 4",
+        "flow_type": "perimeter",
+        "show_plan_steps": False,
+        "plan_steps": [],
+        "multiple_choice_strategy": None,
+        "support_rules": {
+            "goi_y": "Nhắc hình vuông có 4 cạnh bằng nhau.",
+            "tung_buoc": "Cho tìm số cạnh rồi nhân với độ dài 1 cạnh.",
+            "cach_giai": "Nêu phép nhân và đáp số."
+        },
+        "common_errors": ["Quên nhân 4"]
+    },
+    "perimeter_rectangle": {
+        "major_type": "geometry_measurement",
+        "sub_type": "rectangle_perimeter",
+        "label": "Chu vi hình chữ nhật",
+        "keywords": ["chu vi hình chữ nhật", "chiều dài", "chiều rộng"],
+        "knowledge_used": "Lấy chiều dài cộng chiều rộng rồi nhân 2",
+        "flow_type": "perimeter",
+        "show_plan_steps": True,
+        "plan_steps": ["Tìm tổng chiều dài và chiều rộng", "Nhân 2 để ra chu vi"],
+        "multiple_choice_strategy": None,
+        "support_rules": {
+            "goi_y": "Nhắc cộng chiều dài với chiều rộng trước.",
+            "tung_buoc": "Làm tổng trước rồi mới nhân 2.",
+            "cach_giai": "Trình bày 2 bước ngắn."
+        },
+        "common_errors": ["Quên nhân 2"]
+    },
+    "number_predecessor": {
+        "major_type": "number_relation",
+        "sub_type": "predecessor",
+        "label": "Số liền trước",
+        "keywords": ["số liền trước"],
+        "knowledge_used": "Lấy số đã cho trừ 1",
+        "flow_type": "number_relation",
+        "show_plan_steps": False,
+        "plan_steps": [],
+        "multiple_choice_strategy": None,
+        "support_rules": {
+            "goi_y": "Nhắc lùi lại 1 đơn vị.",
+            "tung_buoc": "Nói rõ lấy số đó trừ 1.",
+            "cach_giai": "Cho phép tính hoặc câu trả lời ngắn."
+        },
+        "common_errors": ["Nhầm sang số liền sau"]
+    },
+    "number_successor": {
+        "major_type": "number_relation",
+        "sub_type": "successor",
+        "label": "Số liền sau",
+        "keywords": ["số liền sau"],
+        "knowledge_used": "Lấy số đã cho cộng 1",
+        "flow_type": "number_relation",
+        "show_plan_steps": False,
+        "plan_steps": [],
+        "multiple_choice_strategy": None,
+        "support_rules": {
+            "goi_y": "Nhắc tiến thêm 1 đơn vị.",
+            "tung_buoc": "Nói rõ lấy số đó cộng 1.",
+            "cach_giai": "Cho phép tính hoặc câu trả lời ngắn."
+        },
+        "common_errors": ["Nhầm sang số liền trước"]
+    },
+    "find_unknown_minuend": {
+        "major_type": "find_unknown",
+        "sub_type": "minuend",
+        "label": "Tìm số bị trừ",
+        "keywords": ["bị trừ đi", "tìm số đó"],
+        "knowledge_used": "Muốn tìm số bị trừ, lấy hiệu cộng số trừ",
+        "flow_type": "find_unknown",
+        "show_plan_steps": False,
+        "plan_steps": [],
+        "multiple_choice_strategy": None,
+        "support_rules": {
+            "goi_y": "Nhắc công thức số bị trừ = hiệu + số trừ.",
+            "tung_buoc": "Cho tìm hiệu và số trừ rồi cộng lại.",
+            "cach_giai": "Nêu phép cộng và đáp số."
+        },
+        "common_errors": ["Lấy hiệu trừ số trừ"]
+    },
+    "operation_chain": {
+        "major_type": "operation_chain",
+        "sub_type": "two_steps",
+        "label": "Chuỗi thao tác",
+        "keywords": ["->", "ô trống"],
+        "knowledge_used": "Làm lần lượt từng thao tác",
+        "flow_type": "multi_step",
+        "show_plan_steps": True,
+        "plan_steps": ["Tính ô trống thứ nhất", "Tính ô trống thứ hai"],
+        "multiple_choice_strategy": None,
+        "support_rules": {
+            "goi_y": "Nhắc làm từ trái sang phải.",
+            "tung_buoc": "Làm xong ô trước rồi mới sang ô sau.",
+            "cach_giai": "Nêu lần lượt từng ô trống."
+        },
+        "common_errors": ["Nhảy thẳng sang ô cuối"]
+    },
+    "multi_step_give_away": {
+        "major_type": "multi_step",
+        "sub_type": "multiply_then_adjust",
+        "label": "Bài nhiều bước - gấp lên rồi bớt đi",
+        "keywords": ["gấp", "tặng", "còn lại"],
+        "knowledge_used": "Tìm phần được thêm trước, rồi tính tất cả, rồi trừ phần bớt đi",
+        "flow_type": "multi_step",
+        "show_plan_steps": True,
+        "plan_steps": ["Tìm phần được thêm hoặc được cho", "Tìm số còn lại sau khi bớt đi"],
+        "multiple_choice_strategy": None,
+        "support_rules": {
+            "goi_y": "Nhắc nhìn phần gấp lên trước.",
+            "tung_buoc": "Làm lần lượt từng bước.",
+            "cach_giai": "Trình bày các bước ngắn gọn."
+        },
+        "common_errors": ["Bỏ qua bước tìm phần được thêm"]
+    },
+})
