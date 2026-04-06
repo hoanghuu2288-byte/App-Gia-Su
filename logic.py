@@ -56,6 +56,7 @@ def init_app_state(st):
         "hint_request_count": 0,
         "last_assistant_response": "",
         "last_real_user_reply": "",
+        "tutoring_state": {},
     }
 
     for key, value in defaults.items():
@@ -84,6 +85,7 @@ def reset_session(st):
         "hint_request_count": 0,
         "last_assistant_response": "",
         "last_real_user_reply": "",
+        "tutoring_state": {},
     }
     for key, value in defaults.items():
         _set_state_value(st.session_state, key, value)
@@ -234,6 +236,7 @@ def start_new_problem(st, new_problem_text: str):
     _set_state_value(st.session_state, "is_finished", False)
     _set_state_value(st.session_state, "hint_request_count", 0)
     _set_state_value(st.session_state, "last_assistant_response", "")
+    _set_state_value(st.session_state, "tutoring_state", {})
     _set_state_value(st.session_state, "last_real_user_reply", "")
 
 
@@ -1094,10 +1097,100 @@ def _infer_active_micro_goal(problem_text: str, chat_history: list) -> dict:
 
 
 def _line_block(lines: list[str]) -> str:
-    return "\n".join([line for line in lines if line]).strip()
+    return "  \n".join([line for line in lines if line]).strip()
 
 
 
+
+
+
+def _last_assistant_text(chat_history: list) -> str:
+    for msg in reversed(chat_history or []):
+        if msg.get("role") == "assistant":
+            return str(msg.get("content", ""))
+    return ""
+
+
+def _last_visible_user_text(chat_history: list) -> str:
+    for msg in reversed(chat_history or []):
+        if msg.get("role") == "user" and not msg.get("hidden"):
+            return str(msg.get("content", ""))
+    return ""
+
+
+def _advance_mcq_circle_hint(chat_history: list, solved: dict) -> str:
+    last = normalize_text(_last_assistant_text(chat_history))
+
+    if "mình sang d" in last or "o có phải là tâm hình tròn không" in last:
+        return _line_block([
+            "D đúng nhé, vì O là tâm hình tròn.",
+            "A và C sai vì OQ, OP chỉ là bán kính.",
+            "B sai vì MN là đường kính, không phải bán kính.",
+            "Đáp án đúng: D.",
+        ])
+
+    if "mình sang c" in last or "op là bán kính hay đường kính" in last:
+        return "C sai nhé, vì OP đi từ tâm ra đường tròn nên là bán kính. Giờ mình sang D nhé: O có phải là tâm hình tròn không?"
+
+    if "mình sang b" in last or "mn là bán kính hay đường kính" in last:
+        return "B sai nhé, vì MN đi qua tâm và nối hai điểm trên đường tròn nên là đường kính. Giờ mình sang C nhé: OP là bán kính hay đường kính?"
+
+    if "mình xét a trước" in last or "oq đi từ tâm ra đường tròn" in last:
+        return "A sai nhé, vì OQ đi từ tâm ra đường tròn nên là bán kính. Giờ mình sang B nhé: MN là bán kính hay đường kính?"
+
+    return "Mình xét A trước nhé. OQ đi từ tâm ra đường tròn, vậy nó là bán kính hay đường kính?"
+
+
+def _advance_geometry_farthest_hint(chat_history: list, solved: dict) -> str:
+    last = normalize_text(_last_assistant_text(chat_history))
+    correct_letter = solved.get("correct_letter")
+    correct_name = solved.get("correct_name")
+    correct_value = solved.get("correct_value")
+    if "số nào lớn nhất" in last:
+        return f"Mình nhìn 4 số nhé. Số lớn nhất là {_format_int(correct_value)} m, nên đường đến {correct_name} là xa nhất. Nếu ghép với đáp án chữ thì con chọn {correct_letter}."
+    return "Mình tìm số lớn nhất trong 4 quãng đường nhé. Con nhìn xem số nào lớn nhất?"
+
+
+def _advance_multi_step_hint(chat_history: list, solved: dict) -> str:
+    last = normalize_text(_last_assistant_text(chat_history))
+
+    if solved.get("kind") == "multi_step_bricks":
+        bought, answer = solved["step_values"]
+        if f"78 000 trừ {_format_int(bought).lower()}".replace(" ","") in last.replace(" ","") or "còn bao nhiêu" in last:
+            return _line_block([
+                f"Mình tính tiếp nhé: 78 000 - {_format_int(bought)} = {_format_int(answer)}.",
+                f"Đáp số: {solved['answer_text']}.",
+                "Kiến thức cần nhớ: bài này làm 2 bước, nhân trước rồi trừ sau.",
+            ])
+        if "18 000 x 3" in last or "bằng bao nhiêu" in last or "bước 1 mình tìm số viên gạch đã mua" in last:
+            return f"Mình tính luôn nhé: 18 000 x 3 = {_format_int(bought)} viên gạch. Giờ sang bước 2: lấy 78 000 trừ {_format_int(bought)}. Con thử tính tiếp nào?"
+        return "Bước 1 nhé: mình lấy 18 000 x 3 để tìm số viên gạch đã mua. Con thử tính xem bằng bao nhiêu?"
+
+    if solved.get("kind") == "store_case":
+        sold, answer = solved["step_values"]
+        if "còn lại" in last or "giờ con tìm phần còn lại" in last:
+            return _line_block([
+                f"Mình tính tiếp nhé: lấy số ban đầu trừ số đã bán thì còn {solved['answer_text']}.",
+                f"Đáp số: {solved['answer_text']}.",
+                "Kiến thức cần nhớ: tìm phần đã bán trước rồi mới tìm phần còn lại.",
+            ])
+        if "số chồng nhân với số quyển bán" in last or "đã bán trước" in last:
+            return f"Mình tính luôn nhé: số đã bán là {_format_int(sold)} {solved['unit']}. Giờ con lấy số ban đầu trừ {_format_int(sold)} nhé."
+        return "Mình đi 2 bước. Con tìm số đã bán trước nhé."
+
+    if solved.get("kind") == "unit_rate":
+        one_part, answer = solved["step_values"]
+        if "phần cần hỏi" in last or "tìm số của phần cần hỏi" in last:
+            return _line_block([
+                f"Mình tính tiếp nhé: phần cần tìm là {solved['answer_text']}.",
+                f"Đáp số: {solved['answer_text']}.",
+                "Kiến thức cần nhớ: rút về 1 phần trước rồi mới tìm nhiều phần.",
+            ])
+        if "lấy tổng số chia cho số" in last or "tìm 1" in last:
+            return f"Mình tính luôn nhé: 1 {solved['group_name']} có {_format_int(one_part)} {solved['unit']}. Giờ con tìm phần cần hỏi tiếp nào?"
+        return f"Đây là bài rút về đơn vị. Con tìm 1 {solved['group_name']} trước nhé."
+
+    return None
 
 def _build_supported_opening_from_solution(problem_text: str, solved: dict | None) -> str | None:
     if not solved:
@@ -1328,6 +1421,7 @@ def _child_reply_for_supported_problem(
     allow_full_solution: bool,
     support_level: str,
     stuck_count: int,
+    chat_history: list,
 ) -> str | None:
     solved = _solve_supported_problem(problem_text)
     blueprint = get_problem_blueprint(detect_problem_type(problem_text))
@@ -1339,6 +1433,15 @@ def _child_reply_for_supported_problem(
             return f"Thầy chưa chốt đáp án ngay nhé. {hint}"
 
     if reply_type == "student_dont_know":
+        if flow_type == "multiple_choice" and solved:
+            if solved.get("kind") == "circle_mcq":
+                return _advance_mcq_circle_hint(chat_history, solved)
+            if solved.get("kind") == "geometry_farthest":
+                return _advance_geometry_farthest_hint(chat_history, solved)
+        if flow_type in {"multi_step", "unit_rate"} and solved:
+            advanced = _advance_multi_step_hint(chat_history, solved)
+            if advanced:
+                return advanced
         return _child_hint_for_supported_problem(problem_text, solved, max(stuck_count, 1))
 
     if flow_type == "multiple_choice" and solved:
@@ -1556,7 +1659,7 @@ def generate_followup_tutoring_response(
     is_finished: bool = False,
     hint_request_count: int = 0,
 ) -> str | None:
-    del chat_history, current_step, last_error_type, require_full_presentation, small_error, is_finished, hint_request_count
+    del current_step, last_error_type, require_full_presentation, small_error, is_finished, hint_request_count
 
     if mode == "child":
         return _child_reply_for_supported_problem(
@@ -1566,6 +1669,7 @@ def generate_followup_tutoring_response(
             allow_full_solution=allow_full_solution,
             support_level=support_level,
             stuck_count=stuck_count,
+            chat_history=chat_history,
         )
 
     solved = _solve_supported_problem(problem_text)
