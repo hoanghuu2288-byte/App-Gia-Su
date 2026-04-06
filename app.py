@@ -42,26 +42,6 @@ init_app_state(st)
 
 APP_PASSWORD = os.getenv("APP_PASSWORD", "vip123").strip() or "vip123"
 
-MOBILE_CSS = """
-<style>
-.block-container {padding-top: 1rem; padding-bottom: 4.5rem; max-width: 760px;}
-div[data-testid="stChatMessage"] {padding-top: .35rem; padding-bottom: .35rem;}
-div[data-testid="stChatInput"] {background: white;}
-button[kind="secondary"], button[kind="primary"] {border-radius: 12px;}
-@media (max-width: 768px) {
-  .block-container {padding-left: 0.8rem; padding-right: 0.8rem; padding-top: 0.6rem; padding-bottom: 6rem;}
-  h1 {font-size: 1.55rem !important;}
-  h2, h3 {font-size: 1.1rem !important;}
-  p, li, label, .stMarkdown, .stCaption, .stTextInput, .stTextArea {font-size: 0.98rem !important;}
-  div[data-testid="column"] {width: 100% !important; flex: 1 1 100% !important;}
-  .stButton > button {width: 100%; min-height: 2.8rem;}
-}
-</style>
-"""
-
-st.markdown(MOBILE_CSS, unsafe_allow_html=True)
-
-
 
 # =========================================================
 # IMAGE / OCR / STRUCTURED EXTRACTION
@@ -693,7 +673,6 @@ def maybe_retry_non_repeating_response(
 
 
 def start_problem_session():
-    start_new_problem(st, st.session_state.problem_text)
     reset_learning_flow()
 
     response = generate_opening_tutoring_response(
@@ -716,9 +695,6 @@ def start_problem_session():
     st.session_state.is_finished = detect_finished_response(response)
     append_chat_message("assistant", response)
     st.session_state.last_assistant_response = response
-    st.session_state.show_help_buttons = (
-        st.session_state.mode == "child" and not st.session_state.is_finished
-    )
 
 
 def run_followup_turn(
@@ -921,8 +897,7 @@ else:
             if uploaded_file is not None:
                 try:
                     img = Image.open(uploaded_file)
-                    with st.spinner("App đang đọc ảnh và ghép đề..."):
-                        process_uploaded_image(img, typed_problem)
+                    process_uploaded_image(img, typed_problem)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi khi đọc ảnh: {e}")
@@ -931,8 +906,7 @@ else:
                 clear_image_state()
                 st.session_state.problem_text = typed_problem.strip()
                 st.session_state.problem_confirmed = True
-                with st.spinner("App đang chuẩn bị bài..."):
-                    start_problem_session()
+                start_problem_session()
                 st.rerun()
 
             else:
@@ -1049,8 +1023,7 @@ else:
                 else:
                     st.session_state.problem_text = final_text
                     st.session_state.problem_confirmed = True
-                    with st.spinner("App đang bắt đầu bài này..."):
-                        start_problem_session()
+                    start_problem_session()
                     st.rerun()
 
         with col_d:
@@ -1087,7 +1060,7 @@ else:
         if (
             st.session_state.mode == "child"
             and not st.session_state.is_finished
-            and st.session_state.show_help_buttons
+            and len(st.session_state.chat_history) > 0
         ):
             st.markdown("**Hỗ trợ thêm:**")
             st.caption('Con bí thì bấm **Gợi ý thêm**, không cần gõ "không biết".')
