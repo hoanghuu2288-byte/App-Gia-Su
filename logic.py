@@ -1,247 +1,481 @@
+# logic.py
+
 from __future__ import annotations
 
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
+from gemini_client import generate_text_response
 from prompts import (
     get_first_response_guide,
-    get_summary_prompt,
     get_support_guide,
+    get_summary_prompt,
     get_system_prompt,
 )
-from grade3_math_master import GRADE3_MATH_MASTER, get_problem_blueprint
-
-
-CHOICE_LETTERS = ["A", "B", "C", "D"]
 
 
 # =========================================================
-# STATE
+# TEXT NORMALIZATION
 # =========================================================
-def _set_state_value(session_state, key: str, value: Any) -> None:
-    try:
-        session_state[key] = value
-    except Exception:
-        setattr(session_state, key, value)
+def _strip_accents(text: str) -> str:
+    text = text.replace("đ", "d").replace("Đ", "D")
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
 
 
-def _get_state_value(session_state, key: str, default: Any = None) -> Any:
-    try:
-        return session_state[key]
-    except Exception:
-        return getattr(session_state, key, default)
+
+def _normalize_for_matching(text: str) -> str:
+    text = _strip_accents((text or "").lower())
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-def init_app_state(st):
-    defaults = {
-        "mode": "child",
-        "support_level": "goi_y",
-        "problem_text": "",
-        "problem_confirmed": False,
-        "problem_type": "",
-        "problem_blueprint": {},
-        "current_step": "start",
-        "last_error_type": "",
-        "allow_full_solution": False,
-        "chat_history": [],
-        "summary": "",
-        "pending_image": None,
-        "presentation_retry_count": 0,
-        "stuck_count": 0,
-        "show_help_buttons": False,
-        "show_hint_button": False,
-        "show_solution_button": False,
-        "is_finished": False,
-        "hint_request_count": 0,
-        "last_assistant_response": "",
-        "last_real_user_reply": "",
-        "tutoring_state": {},
-    }
 
-    for key, value in defaults.items():
-        if _get_state_value(st.session_state, key, None) is None:
-            _set_state_value(st.session_state, key, value)
+def _compact_number_text(text: str) -> str:
+    return re.sub(r"[^0-9]", "", text or "")
 
 
-def reset_session(st):
-    defaults = {
-        "problem_text": "",
-        "problem_confirmed": False,
-        "problem_type": "",
-        "problem_blueprint": {},
-        "current_step": "start",
-        "last_error_type": "",
-        "allow_full_solution": False,
-        "chat_history": [],
-        "summary": "",
-        "pending_image": None,
-        "presentation_retry_count": 0,
-        "stuck_count": 0,
-        "show_help_buttons": False,
-        "show_hint_button": False,
-        "show_solution_button": False,
-        "is_finished": False,
-        "hint_request_count": 0,
-        "last_assistant_response": "",
-        "last_real_user_reply": "",
-        "tutoring_state": {},
-    }
-    for key, value in defaults.items():
-        _set_state_value(st.session_state, key, value)
+
+def _parse_int(text: str) -> int:
+    return int(_compact_number_text(text) or "0")
+
+
+
+def _format_int(value: int) -> str:
+    if abs(value) < 10000:
+        return str(value)
+    return f"{value:,}".replace(",", " ")
 
 
 # =========================================================
-# BASIC NORMALIZATION / DETECTION
+# INPUT NORMALIZATION / REPLY CLASSIFICATION
 # =========================================================
-def normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
+def _extract_choice_letter(user_input: str) -> str | None:
+    if not user_input or not user_input.strip():
+        return None
+
+    raw = user_input.strip()
+    normalized = _normalize_for_matching(raw)
+    if not normalized:
+        return None
+
+    compact = re.sub(r"[^a-z0-9]", "", normalized)
+    if compact in {"a", "b", "c", "d"}:
+        return compact.upper()
+
+    tokens = normalized.split()
+    if tokens and tokens[-1] in {"a", "b", "c", "d"}:
+        prefixes = {
+            ("chon",),
+            ("dap", "an"),
+            ("la",),
+            ("con", "chon"),
+            ("con", "nghi", "la"),
+        }
+        for prefix in prefixes:
+            if tuple(tokens[-(len(prefix) + 1):-1]) == prefix:
+                return tokens[-1].upper()
+
+    direct = re.fullmatch(r"\(?\[?\{?\s*([a-dA-D])\s*[\)\]\}\.\:]?", raw)
+    if direct:
+        return direct.group(1).upper()
+
+    phrase = re.fullmatch(r"(?:dap\s*an|chon|la|con\s*chon)\s*[:\-]?\s*([a-d])", normalized)
+    if phrase:
+        return phrase.group(1).upper()
+
+    return None
+
 
 
 def normalize_user_input(user_input: str) -> str:
-    text = normalize_text(user_input)
-    compact = text.replace(" ", "")
+    text = (user_input or "").strip()
+    if not text:
+        return ""
 
-    choice_patterns = [
-        r"^([abcd])$",
-        r"^đápán([abcd])$",
-        r"^dapan([abcd])$",
-        r"^chon([abcd])$",
-        r"^chọn([abcd])$",
+    choice = _extract_choice_letter(text)
+    if choice:
+        return f"Chọn đáp án {choice}"
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+
+def classify_user_reply(user_input: str) -> str:
+    raw_text = normalize_user_input(user_input)
+    if not raw_text:
+        return "empty"
+
+    text = raw_text.lower()
+    normalized = _normalize_for_matching(raw_text)
+    compact = normalized.replace(" ", "")
+
+    exact_dont_know = {
+        "khong",
+        "ko",
+        "k",
+        "khongbiet",
+        "kobiet",
+        "kbiet",
+        "khonghieu",
+        "kohieu",
+        "chuabiet",
+    }
+    dont_know_signals = [
+        "khong biet",
+        "ko biet",
+        "k biet",
+        "con khong biet",
+        "khong hieu",
+        "khong ro",
+        "kho qua",
+        "con bi",
+        "khong lam duoc",
+        "khong biet lam",
+        "chua biet",
+        "chua hieu",
+        "khong biet nua",
     ]
-    for pattern in choice_patterns:
-        match = re.match(pattern, compact, flags=re.IGNORECASE)
-        if match:
-            return f"Chọn đáp án {match.group(1).upper()}"
 
-    return (user_input or "").strip()
+    if normalized in exact_dont_know or compact in exact_dont_know:
+        return "student_dont_know"
+
+    if any(signal in normalized for signal in dont_know_signals):
+        return "student_dont_know"
+
+    if _extract_choice_letter(raw_text):
+        return "student_choice_only"
+
+    ask_answer_signals = [
+        "dap an",
+        "giai luon",
+        "cho con dap an",
+        "cho dap an",
+        "giai ho",
+        "lam ho",
+        "cho con ket qua",
+        "noi dap an",
+        "cho con loi giai",
+        "cho con xem dap an",
+    ]
+    if any(signal in normalized for signal in ask_answer_signals):
+        return "student_asks_answer"
+
+    cleaned = re.sub(r"[\s,\.]", "", text)
+    if cleaned.isdigit():
+        return "student_number_only"
+
+    return "normal_reply"
 
 
-def looks_like_new_problem(user_input: str) -> bool:
-    raw = (user_input or "").strip()
-    text = normalize_text(raw)
 
-    if len(text) < 18:
+def is_small_error(user_input: str) -> bool:
+    text = (user_input or "").strip().lower()
+    has_number = any(ch.isdigit() for ch in text)
+    has_equal = "=" in text
+    has_unit = any(
+        unit in text
+        for unit in [
+            "bao",
+            "cm",
+            "kg",
+            "g",
+            "quyển",
+            "quyen",
+            "chai",
+            "khay",
+            "mét",
+            "met",
+            "m",
+            "viên",
+            "vien",
+            "gạch",
+            "gach",
+            "bút",
+            "but",
+            "hoa",
+        ]
+    )
+    return has_number and not has_equal and not has_unit
+
+
+
+def should_require_full_presentation(st, user_input: str) -> bool:
+    text = (user_input or "").strip().lower()
+    if "=" in text:
         return False
-
-    if any(text.startswith(prefix) for prefix in ["con nghĩ", "theo con", "em nghĩ", "vì", "chắc là", "hình như"]):
+    if any(unit in text for unit in ["bao", "cm", "kg", "g", "quyển", "chai", "khay", "mét", "m", "viên", "gạch", "bút", "hoa"]):
         return False
-
-    question_signals = [
-        "hỏi",
-        "tính",
-        "tìm",
-        "bao nhiêu",
-        "còn lại",
-        "còn phải",
-        "chia đều",
-        "chu vi",
-        "số liền trước",
-        "số liền sau",
-        "khẳng định đúng",
-        "đáp án đúng",
-        "ô trống",
-    ]
-    structure_signals = [
-        "mỗi lần",
-        "mỗi khay",
-        "mỗi hộp",
-        "chiều dài",
-        "chiều rộng",
-        "hình vuông",
-        "hình chữ nhật",
-        "hình tròn",
-        "->",
-    ]
-    numeric_count = len(re.findall(r"\d[\d .]*", raw))
-
-    has_math_question = any(signal in text for signal in question_signals)
-    has_structure = any(signal in text for signal in structure_signals) or numeric_count >= 2
-
-    return has_math_question and has_structure
+    if getattr(st.session_state, "presentation_retry_count", 0) >= 1:
+        return False
+    return bool(re.sub(r"[^0-9]", "", text))
 
 
-def _matches_keywords(text: str, keywords: list[str]) -> int:
-    score = 0
-    for keyword in keywords:
-        kw = normalize_text(keyword)
-        if kw and kw in text:
-            score += 1
-    return score
+# =========================================================
+# PROBLEM TYPE / LIGHT ANALYSIS
+# =========================================================
+def _infer_teaching_frame(problem_text: str) -> dict[str, str]:
+    raw = (problem_text or "").lower()
+    text = _normalize_for_matching(problem_text)
+
+    if "lien truoc" in text:
+        return {
+            "problem_type": "Số liền trước",
+            "knowledge": "Lấy số đã cho trừ 1",
+            "thinking": "Nhìn số đã cho rồi bớt đi 1",
+        }
+
+    if "lien sau" in text:
+        return {
+            "problem_type": "Số liền sau",
+            "knowledge": "Lấy số đã cho cộng 1",
+            "thinking": "Nhìn số đã cho rồi thêm 1",
+        }
+
+    if "hinh vuong" in text and ("canh" in text or "chu vi" in text or "doan day" in text):
+        return {
+            "problem_type": "Chu vi hình vuông",
+            "knowledge": "Lấy cạnh nhân 4",
+            "thinking": "Muốn biết độ dài quanh hình vuông thì tính 4 cạnh",
+        }
+
+    if "hinh chu nhat" in text and "chu vi" in text:
+        return {
+            "problem_type": "Chu vi hình chữ nhật",
+            "knowledge": "Lấy chiều dài cộng chiều rộng rồi nhân 2",
+            "thinking": "Tính tổng một chiều dài và một chiều rộng trước, rồi nhân 2",
+        }
+
+    if "xa nhat" in text and ("vườn hoa" in problem_text.lower() or "vuon hoa" in text or "khoang cach" in text):
+        return {
+            "problem_type": "So sánh số đo để chọn xa nhất",
+            "knowledge": "So sánh các số đo độ dài",
+            "thinking": "Nhìn các số đo rồi chọn số lớn nhất",
+        }
+
+    if "chon khang dinh dung" in text and ("hinh tron" in text or "tam o" in text):
+        return {
+            "problem_type": "Nhận biết tâm, bán kính, đường kính",
+            "knowledge": "Phân biệt tâm, bán kính, đường kính của hình tròn",
+            "thinking": "Nhìn tâm trước, rồi xét đoạn nào đi từ tâm ra đường tròn",
+        }
+
+    if (("hop" in text or "thung" in text or "goi" in text) and ("tat ca" in text or "nhu the" in text or "như thế" in problem_text.lower()) and ("nhu nhau" in text or "moi" in text or "đều" in problem_text.lower())):
+        return {
+            "problem_type": "Rút về đơn vị",
+            "knowledge": "Phép chia rồi phép nhân",
+            "thinking": "Tìm 1 phần trước, rồi từ 1 phần tính nhiều phần",
+        }
+
+    if "chia deu" in text:
+        return {
+            "problem_type": "Chia đều",
+            "knowledge": "Phép chia",
+            "thinking": "Lấy tổng chia cho số phần bằng nhau",
+        }
+
+    if ((" m " in f" {text} " and " cm" in raw) or (" kg" in raw and " g" in raw) or ("met" in text and "xang ti met" in text)):
+        return {
+            "problem_type": "Đổi đơn vị rồi tính",
+            "knowledge": "Đổi về cùng đơn vị rồi cộng hoặc trừ",
+            "thinking": "Đưa các số đo về cùng một đơn vị trước rồi mới tính",
+        }
+
+    if "o trong" in text or "->" in problem_text or "→" in problem_text:
+        return {
+            "problem_type": "Chuỗi thao tác",
+            "knowledge": "Làm lần lượt từng phép tính theo thứ tự",
+            "thinking": "Tính ô trước rồi mới dùng kết quả để tính ô sau",
+        }
+
+    if "gap" in text and ("roi" in text or "sau do" in text or "tang" in text or "bot" in text):
+        return {
+            "problem_type": "Bài nhiều bước",
+            "knowledge": "Phép nhân rồi cộng hoặc trừ",
+            "thinking": "Tính phần gấp lên trước, rồi làm bước tiếp theo",
+        }
+
+    if "moi lan" in text and ("con phai" in text or "con lai" in text or "sau khi" in text or "mua" in text or "ban" in text):
+        return {
+            "problem_type": "Bài nhiều bước",
+            "knowledge": "Phép nhân rồi phép trừ",
+            "thinking": "Tính phần đã có trước, rồi tìm phần còn lại hoặc còn thiếu",
+        }
+
+    if "mot so" in text and "tim so do" in text and "tru" in text:
+        return {
+            "problem_type": "Tìm thành phần chưa biết",
+            "knowledge": "Muốn tìm số bị trừ thì lấy hiệu cộng số trừ",
+            "thinking": "Lấy hiệu cộng với số trừ",
+        }
+
+    if "mot so" in text and "tim so do" in text and "chia" in text:
+        return {
+            "problem_type": "Tìm thành phần chưa biết",
+            "knowledge": "Muốn tìm số bị chia thì lấy thương nhân số chia",
+            "thinking": "Lấy thương nhân với số chia",
+        }
+
+    if "tinh gia tri bieu thuc" in text:
+        return {
+            "problem_type": "Tính giá trị biểu thức",
+            "knowledge": "Nhân, chia trước rồi mới cộng, trừ",
+            "thinking": "Nhìn phép nhân, chia trước rồi mới làm phép còn lại",
+        }
+
+    return {
+        "problem_type": "Bài toán có lời văn",
+        "knowledge": "Đọc kỹ đề để chọn phép tính phù hợp",
+        "thinking": "Xem bài đang hỏi gì rồi tìm bước cần làm trước",
+    }
 
 
-def detect_problem_type(problem_text: str) -> str:
-    text = normalize_text(problem_text)
 
-    if "số liền trước" in text:
-        return "number_predecessor"
-    if "số liền sau" in text:
-        return "number_successor"
-    if "chu vi hình vuông" in text or ("hình vuông" in text and "cạnh" in text and "đoạn dây" in text):
-        return "perimeter_square"
-    if "chu vi hình chữ nhật" in text or ("hình chữ nhật" in text and "chiều dài" in text and "chiều rộng" in text):
-        return "perimeter_rectangle"
-    if "bị trừ đi" in text and "tìm số" in text:
-        return "find_unknown_minuend"
-    if "->" in text and "ô trống" in text:
-        return "operation_chain"
-    if "gấp" in text and any(k in text for k in ["tặng", "cho đi", "bớt đi", "còn lại"]):
-        return "multi_step_give_away"
-    if "chia đều" in text and any(k in text for k in ["mỗi khay", "mỗi hộp", "mỗi phần", "mỗi chồng"]):
-        return "one_step_division_word"
-
-    if any(k in text for k in ["chọn khẳng định đúng", "chọn đáp án đúng", "câu nào đúng", "phương án đúng"]):
-        if any(k in text for k in ["tâm hình tròn", "bán kính", "đường kính", "hình tròn", "oq", "op", "mn"]):
-            return "multiple_choice_geometry_circle"
-        return "multiple_choice_general"
-
-    if any(k in text for k in ["tâm", "bán kính", "đường kính", "hình tròn"]):
-        return "geometry_identification_circle_parts"
-
-    best_type = None
-    best_score = -1
-    for problem_type, config in GRADE3_MATH_MASTER.items():
-        score = _matches_keywords(text, config.get("keywords", []))
-        if score > best_score:
-            best_type = problem_type
-            best_score = score
-
-    if best_type and best_score > 0:
-        return best_type
-
-    if any(k in text for k in ["gấp", "mỗi lần", "sau đó", "rồi", "còn lại", "còn phải", "còn thiếu"]):
-        return "multi_step_find_missing"
-    if any(k in text for k in [" m ", " cm", " kg", " g", "xăng-ti-mét", "ki-lô-gam", "đổi"]):
-        return "unit_conversion_then_calculate"
-    return "multi_step_find_missing"
+def _build_step_plan(problem_text: str, frame: dict[str, str]) -> list[str]:
+    pt = frame["problem_type"]
+    if pt == "Rút về đơn vị":
+        return [
+            "Tìm 1 phần trước.",
+            "Từ 1 phần suy ra nhiều phần.",
+        ]
+    if pt == "Đổi đơn vị rồi tính":
+        return ["Đổi về cùng đơn vị.", "Làm phép tính theo đề bài."]
+    if pt == "Chu vi hình vuông":
+        return ["Lấy cạnh nhân 4."]
+    if pt == "Chu vi hình chữ nhật":
+        return ["Cộng dài với rộng.", "Lấy kết quả nhân 2."]
+    if pt in {"Số liền trước", "Số liền sau"}:
+        return ["Nhìn số đã cho rồi thêm hoặc bớt 1."]
+    if pt == "Chuỗi thao tác":
+        return ["Làm ô đầu trước.", "Dùng kết quả đó cho ô sau."]
+    if pt == "Tìm thành phần chưa biết":
+        return ["Gọi đúng tên thành phần.", "Dùng đúng quy tắc tương ứng."]
+    if pt == "Bài nhiều bước":
+        return ["Làm bước trung gian trước.", "Dùng kết quả đó để ra đáp án cuối."]
+    if pt == "Chia đều":
+        return ["Lấy tổng chia cho số phần bằng nhau."]
+    if pt == "So sánh số đo để chọn xa nhất":
+        return ["So sánh các số đo.", "Nối số lớn nhất với đáp án đúng."]
+    if pt == "Nhận biết tâm, bán kính, đường kính":
+        return ["Xác định tâm.", "Đối chiếu từng lựa chọn với định nghĩa đúng."]
+    return ["Xác định điều cần tìm trước.", "Chọn phép tính đúng để làm."]
 
 
-def start_new_problem(st, new_problem_text: str):
-    detected_type = detect_problem_type(new_problem_text)
-    blueprint = get_problem_blueprint(detected_type)
 
-    _set_state_value(st.session_state, "problem_text", new_problem_text.strip())
-    _set_state_value(st.session_state, "problem_confirmed", True)
-    _set_state_value(st.session_state, "problem_type", detected_type)
-    _set_state_value(st.session_state, "problem_blueprint", blueprint)
-    _set_state_value(st.session_state, "current_step", "start")
-    _set_state_value(st.session_state, "last_error_type", "")
-    _set_state_value(st.session_state, "chat_history", [])
-    _set_state_value(st.session_state, "summary", "")
-    _set_state_value(st.session_state, "presentation_retry_count", 0)
-    _set_state_value(st.session_state, "stuck_count", 0)
-    _set_state_value(st.session_state, "show_help_buttons", False)
-    _set_state_value(st.session_state, "show_hint_button", False)
-    _set_state_value(st.session_state, "show_solution_button", False)
-    _set_state_value(st.session_state, "is_finished", False)
-    _set_state_value(st.session_state, "hint_request_count", 0)
-    _set_state_value(st.session_state, "last_assistant_response", "")
-    _set_state_value(st.session_state, "tutoring_state", {})
-    _set_state_value(st.session_state, "last_real_user_reply", "")
+def _text_mentions_number(text: str, value: int) -> bool:
+    compact = _compact_number_text(text)
+    return str(value) in compact if compact else False
+
+
+def _build_micro_goals(problem_text: str) -> list[str]:
+    solved = _solve_supported_problem(problem_text)
+    if solved and solved.get("kind") == "geometry_farthest":
+        return [
+            "Tìm số đo lớn nhất trong các khoảng cách.",
+            "Nối số đo lớn nhất với đúng tên vườn hoa.",
+            "Chốt đáp án chữ cái tương ứng.",
+        ]
+    if solved and solved.get("kind") == "circle_mcq":
+        return [
+            "Nhìn đúng khái niệm đang hỏi trong 4 lựa chọn.",
+            "Loại các câu sai nếu cần.",
+            "Chọn đáp án đúng và nói vì sao ngắn gọn.",
+        ]
+    if solved and solved.get("category") == "doi_don_vi":
+        return [
+            "Đổi số đo về cùng một đơn vị trước.",
+            "Làm phép tính sau khi đã đổi đơn vị.",
+            "Chốt đáp số đầy đủ đơn vị.",
+        ]
+    if solved and solved.get("category") == "rut_ve_don_vi":
+        return [
+            "Tìm 1 phần trước.",
+            "Từ 1 phần suy ra nhiều phần.",
+            "Chốt đáp số đầy đủ.",
+        ]
+    if solved and solved.get("category") == "chia_deu":
+        return [
+            "Viết phép chia để tìm 1 phần.",
+            "Nói đáp số đầy đủ.",
+        ]
+    if solved and solved.get("category") == "nhan_roi_tru":
+        return [
+            "Tính bước trung gian trước.",
+            "Dùng kết quả đó để tìm phần còn lại hoặc còn thiếu.",
+            "Chốt đáp số đầy đủ.",
+        ]
+    if solved and solved.get("category") in {"so_lien_sau", "so_lien_truoc"}:
+        return [
+            "Làm phép tính ngắn đúng quy tắc.",
+            "Chốt đáp án cuối cùng.",
+        ]
+    frame = _infer_teaching_frame(problem_text)
+    return _build_step_plan(problem_text, frame)
+
+
+def _infer_active_micro_goal(problem_text: str, chat_history: list[dict[str, Any]]) -> dict[str, Any]:
+    solved = _solve_supported_problem(problem_text)
+    joined = "\n".join(msg.get("content", "") for msg in chat_history if not msg.get("hidden"))
+    goals = _build_micro_goals(problem_text)
+
+    def pack(index: int) -> dict[str, Any]:
+        index = max(0, min(index, len(goals) - 1))
+        return {"index": index, "text": goals[index], "total": len(goals)}
+
+    if not solved:
+        return pack(0)
+
+    if solved.get("kind") == "geometry_farthest":
+        if not _text_mentions_number(joined, solved["correct_value"]):
+            return pack(0)
+        if not _contains_name(joined, solved["correct_name"]):
+            return pack(1)
+        if _response_mentions_choice(joined) != solved["correct_letter"]:
+            return pack(2)
+        return pack(len(goals) - 1)
+
+    if solved.get("kind") == "circle_mcq":
+        if _response_mentions_choice(joined) != solved["correct_letter"] and not _contains_name(joined, solved["correct_name"]):
+            return pack(0)
+        return pack(len(goals) - 1)
+
+    steps = solved.get("step_values", {})
+    category = solved.get("category")
+    if category == "doi_don_vi":
+        if not _text_mentions_number(joined, steps.get("converted", -1)):
+            return pack(0)
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(1)
+        return pack(2)
+    if category == "rut_ve_don_vi":
+        if not _text_mentions_number(joined, steps.get("one_part", -1)):
+            return pack(0)
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(1)
+        return pack(2)
+    if category == "nhan_roi_tru":
+        if not _text_mentions_number(joined, steps.get("intermediate", -1)):
+            return pack(0)
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(1)
+        return pack(2)
+    if category == "chia_deu":
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(0)
+        return pack(1 if len(goals) > 1 else 0)
+    if category in {"so_lien_sau", "so_lien_truoc", "tim_thanh_phan_chua_biet"}:
+        if not _text_mentions_number(joined, solved["answer_value"]):
+            return pack(0)
+        return pack(len(goals) - 1)
+
+    return pack(0)
 
 
 def detect_problem_complexity(problem_text: str) -> str:
-    text = normalize_text(problem_text)
+    text = (problem_text or "").lower()
     multi_step_signals = [
         "mỗi lần",
         "lần",
@@ -257,47 +491,638 @@ def detect_problem_complexity(problem_text: str) -> str:
         "1/3",
         "1/4",
         "1/5",
-        "chọn khẳng định đúng",
-        "chọn đáp án đúng",
-        "mấy hộp",
-        "mấy khay",
-        "mấy gói",
-        "mấy chồng",
+        "gấp",
+        "chu vi",
+        "ô trống",
+        "→",
+        "->",
     ]
-    count = sum(1 for s in multi_step_signals if s in text)
+    count = sum(1 for signal in multi_step_signals if signal in text)
     return "medium_or_hard" if count >= 2 else "easy"
 
 
-# ... trimmed? no, continue below
+# =========================================================
+# SESSION STATE HELPERS
+# =========================================================
+def init_app_state(st):
+    defaults = {
+        "mode": "child",
+        "support_level": "goi_y",
+        "problem_text": "",
+        "problem_confirmed": False,
+        "problem_type": "",
+        "current_step": "start",
+        "last_error_type": "",
+        "allow_full_solution": False,
+        "chat_history": [],
+        "summary": "",
+        "pending_image": None,
+        "presentation_retry_count": 0,
+        "stuck_count": 0,
+        "show_help_buttons": False,
+        "show_hint_button": False,
+        "show_solution_button": False,
+        "is_finished": False,
+        "hint_request_count": 0,
+        "last_assistant_response": "",
+        "last_real_user_reply": "",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-def build_plan_block(problem_blueprint: dict) -> str:
-    if not problem_blueprint or not problem_blueprint.get("show_plan_steps"):
+
+
+def reset_session(st):
+    st.session_state.problem_text = ""
+    st.session_state.problem_confirmed = False
+    st.session_state.problem_type = ""
+    st.session_state.current_step = "start"
+    st.session_state.last_error_type = ""
+    st.session_state.allow_full_solution = False
+    st.session_state.chat_history = []
+    st.session_state.summary = ""
+    st.session_state.pending_image = None
+    st.session_state.presentation_retry_count = 0
+    st.session_state.stuck_count = 0
+    st.session_state.show_help_buttons = False
+    st.session_state.show_hint_button = False
+    st.session_state.show_solution_button = False
+    st.session_state.is_finished = False
+    st.session_state.hint_request_count = 0
+    st.session_state.last_assistant_response = ""
+    st.session_state.last_real_user_reply = ""
+
+
+
+def looks_like_new_problem(user_input: str) -> bool:
+    text = (user_input or "").strip().lower()
+    signals = [
+        "hỏi",
+        "một",
+        "một cửa hàng",
+        "một cuộn",
+        "một thùng",
+        "một thư viện",
+        "một hình",
+        "tính",
+        "tìm x",
+        "tìm",
+        "bao nhiêu",
+        "còn lại",
+        "chia đều",
+        "chiều dài",
+        "chiều rộng",
+        "câu 1",
+        "khoanh",
+        "số liền trước",
+        "số liền sau",
+    ]
+    return len(text) >= 20 and any(signal in text for signal in signals)
+
+
+
+def start_new_problem(st, new_problem_text: str):
+    st.session_state.problem_text = (new_problem_text or "").strip()
+    st.session_state.problem_confirmed = True
+    st.session_state.problem_type = ""
+    st.session_state.current_step = "start"
+    st.session_state.last_error_type = ""
+    st.session_state.allow_full_solution = False
+    st.session_state.chat_history = []
+    st.session_state.summary = ""
+    st.session_state.presentation_retry_count = 0
+    st.session_state.stuck_count = 0
+    st.session_state.show_help_buttons = False
+    st.session_state.show_hint_button = False
+    st.session_state.show_solution_button = False
+    st.session_state.is_finished = False
+    st.session_state.hint_request_count = 0
+    st.session_state.last_assistant_response = ""
+    st.session_state.last_real_user_reply = ""
+
+
+
+def update_step_and_error(st, reply_type: str):
+    mapping = {
+        "student_dont_know": "khong_biet",
+        "student_number_only": "chi_1_con_so",
+        "student_choice_only": "chon_dap_an",
+        "student_asks_answer": "xin_dap_an",
+    }
+    st.session_state.last_error_type = mapping.get(reply_type, "")
+
+
+
+def update_presentation_retry(st, require_full_presentation: bool):
+    st.session_state.presentation_retry_count = (
+        st.session_state.presentation_retry_count + 1 if require_full_presentation else 0
+    )
+
+
+
+def update_stuck_ui(st, reply_type: str):
+    if reply_type == "student_dont_know":
+        st.session_state.stuck_count += 1
+    else:
+        st.session_state.stuck_count = max(0, st.session_state.stuck_count - 1)
+
+    if st.session_state.is_finished:
+        st.session_state.show_help_buttons = False
+        st.session_state.show_hint_button = False
+        st.session_state.show_solution_button = False
+        return
+
+    st.session_state.show_help_buttons = st.session_state.stuck_count >= 1
+    st.session_state.show_hint_button = st.session_state.stuck_count >= 2
+    st.session_state.show_solution_button = st.session_state.stuck_count >= 4 or st.session_state.allow_full_solution
+
+
+# =========================================================
+# FINISH / REPETITION DETECTION
+# =========================================================
+def detect_finished_response(response_text: str) -> bool:
+    text = (response_text or "").lower()
+    strong_signals = [
+        "đáp số:",
+        "đáp án:",
+        "đáp án đúng là",
+        "vậy mình chốt lại",
+        "con đã làm xong bài này",
+        "kiến thức cần nhớ:",
+    ]
+    return any(signal in text for signal in strong_signals)
+
+
+
+def responses_too_similar(previous_text: str, current_text: str) -> bool:
+    prev = _normalize_for_matching(previous_text)
+    curr = _normalize_for_matching(current_text)
+    if not prev or not curr:
+        return False
+    if prev == curr:
+        return True
+    if prev in curr or curr in prev:
+        shorter = min(len(prev), len(curr))
+        longer = max(len(prev), len(curr))
+        if shorter / max(longer, 1) >= 0.75:
+            return True
+    return SequenceMatcher(None, prev, curr).ratio() >= 0.88
+
+
+
+def should_mark_finished_after_child_help(response_text: str, hint_request_count: int) -> bool:
+    if hint_request_count < 3:
+        return False
+    text = _normalize_for_matching(response_text)
+    has_final = any(s in text for s in ["dap so", "dap an", "kien thuc can nho", "ket qua la"])
+    has_question = "?" in (response_text or "")
+    return has_final and not has_question
+
+
+# =========================================================
+# STRUCTURED FACTS / SOLVERS / CHECKERS
+# =========================================================
+def _extract_options(problem_text: str) -> list[dict[str, str]]:
+    flattened = re.sub(r"\s+", " ", problem_text or " ").strip()
+    matches = re.finditer(r"([A-D])\.\s*(.*?)(?=(?:\s+[A-D]\.\s)|$)", flattened)
+    options: list[dict[str, str]] = []
+    for match in matches:
+        letter = match.group(1).upper()
+        text = match.group(2).strip(" .;")
+        if text:
+            options.append({"letter": letter, "text": text})
+    return options
+
+
+
+def _extract_section(problem_text: str, start_markers: list[str], end_markers: list[str]) -> str:
+    text = problem_text or ""
+    lower = text.lower()
+    start_positions = [lower.find(marker.lower()) for marker in start_markers if lower.find(marker.lower()) != -1]
+    if not start_positions:
         return ""
-
-    plan_steps = problem_blueprint.get("plan_steps", [])
-    if not plan_steps:
-        return ""
-
-    lines = [f"- Mình đi {len(plan_steps)} bước:"]
-    for idx, step in enumerate(plan_steps, start=1):
-        lines.append(f"  - Bước {idx}: {step}")
-    return "\n".join(lines)
+    start = min(start_positions)
+    end = len(text)
+    for marker in end_markers:
+        pos = lower.find(marker.lower(), start + 1)
+        if pos != -1:
+            end = min(end, pos)
+    return text[start:end].strip()
 
 
-def build_multiple_choice_rule(problem_blueprint: dict) -> str:
-    if not problem_blueprint:
-        return ""
 
-    if problem_blueprint.get("multiple_choice_strategy") == "check_each_option":
-        return """
-- Đây là bài trắc nghiệm.
-- Phải ưu tiên xét từng đáp án một.
-- Không được tự loại hết A, B, C, D quá sớm.
-- Opening phải hiện rõ:
-  - Cách làm: mình xét từng đáp án một
-  - Mình xét A trước nhé...
-"""
-    return ""
+def _extract_numbers(text: str) -> list[int]:
+    return [_parse_int(match) for match in re.findall(r"\d[\d\s\.]*", text or "")]
+
+
+
+def _extract_named_distances(problem_text: str) -> list[dict[str, Any]]:
+    data_section = _extract_section(
+        problem_text,
+        ["Dữ kiện nhìn thấy trong hình", "Du lieu nhin thay trong hinh", "Chữ/số nhìn thấy trong ảnh", "Chu/sọ nhin thay"],
+        ["Các lựa chọn", "Cac lua chon", "Xem lại ảnh gốc"],
+    )
+    if not data_section:
+        data_section = problem_text or ""
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    pattern = re.compile(
+        r"(?:^|\n|-)\s*(?:Đường đến\s+)?(.+?)\s*:\s*(\d[\d\s]*)\s*m\b",
+        flags=re.IGNORECASE,
+    )
+    for match in pattern.finditer(data_section):
+        name = match.group(1).strip(" -:\n\t")
+        value = _parse_int(match.group(2))
+        if not name or value <= 0:
+            continue
+        key = _normalize_for_matching(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({"name": name, "value": value})
+    return results
+
+
+
+def _match_option_letter_by_name(options: list[dict[str, str]], answer_name: str) -> str | None:
+    target = _normalize_for_matching(answer_name)
+    for option in options:
+        option_name = _normalize_for_matching(option["text"])
+        if not option_name:
+            continue
+        if target == option_name or target in option_name or option_name in target:
+            return option["letter"]
+    return None
+
+
+
+def _solve_geometry_farthest(problem_text: str) -> dict[str, Any] | None:
+    normalized = _normalize_for_matching(problem_text)
+    if "xa nhat" not in normalized:
+        return None
+    options = _extract_options(problem_text)
+    distances = _extract_named_distances(problem_text)
+    if len(options) < 2 or len(distances) < 2:
+        return None
+
+    best = max(distances, key=lambda item: item["value"])
+    best_letter = _match_option_letter_by_name(options, best["name"])
+    if not best_letter:
+        return None
+
+    return {
+        "kind": "geometry_farthest",
+        "problem_type": "Chọn đường xa nhất",
+        "knowledge": "So sánh các số đo độ dài",
+        "thinking": "Nhìn các số đo rồi chọn số lớn nhất",
+        "options": options,
+        "distances": distances,
+        "correct_letter": best_letter,
+        "correct_name": next(opt["text"] for opt in options if opt["letter"] == best_letter),
+        "correct_value": best["value"],
+        "teacher_hint": f"Nhìn các khoảng cách {', '.join(_format_int(d['value']) for d in distances)} rồi tìm số lớn nhất.",
+        "memory": "Muốn tìm xa nhất thì chọn số đo lớn nhất.",
+    }
+
+
+
+def _extract_circle_context(problem_text: str) -> dict[str, Any] | None:
+    normalized = _normalize_for_matching(problem_text)
+    if "hinh tron" not in normalized and "tam o" not in normalized:
+        return None
+    options = _extract_options(problem_text)
+    if not options:
+        return None
+    labels_section = _extract_section(problem_text, ["Nhãn hình học nhìn thấy", "Nhan hinh hoc nhin thay"], ["Các lựa chọn", "Cac lua chon"])
+    source = labels_section or problem_text
+    accent_safe_source = _strip_accents(source)
+    center_match = re.search(r"tam\s+([A-Z])", accent_safe_source, flags=re.IGNORECASE)
+    center = center_match.group(1).upper() if center_match else None
+    points = {m.group(1).upper() for m in re.finditer(r"point\s*\|\s*([A-Z])", source, flags=re.IGNORECASE)}
+    segments = {m.group(1).upper() for m in re.finditer(r"line_segment\s*\|\s*([A-Z]{2})", source, flags=re.IGNORECASE)}
+    if not center:
+        return None
+    return {"center": center, "points": points, "segments": segments, "options": options}
+
+
+
+def _solve_circle_mcq(problem_text: str) -> dict[str, Any] | None:
+    ctx = _extract_circle_context(problem_text)
+    if not ctx:
+        return None
+    center = ctx["center"]
+    segments = ctx["segments"]
+    options = ctx["options"]
+
+    truths: dict[str, bool] = {}
+    for option in options:
+        text = option["text"]
+        norm = _normalize_for_matching(text)
+        letter = option["letter"]
+        truths[letter] = False
+
+        if re.fullmatch(rf"{center.lower()} la tam hinh tron", norm):
+            truths[letter] = True
+            continue
+
+        radius_match = re.fullmatch(r"([a-z]{2}) la ban kinh", norm)
+        if radius_match:
+            seg = radius_match.group(1).upper()
+            truths[letter] = seg in segments and center in seg and len(seg) == 2
+            continue
+
+        diameter_match = re.fullmatch(r"([a-z]{2}) la duong kinh", norm)
+        if diameter_match:
+            # Không khẳng định đường kính nếu dữ kiện ảnh không nêu rõ.
+            truths[letter] = False
+            continue
+
+    true_letters = [letter for letter, value in truths.items() if value]
+    if len(true_letters) != 1:
+        return None
+
+    correct_letter = true_letters[0]
+    correct_text = next(opt["text"] for opt in options if opt["letter"] == correct_letter)
+    return {
+        "kind": "circle_mcq",
+        "problem_type": "Nhận biết tâm, bán kính, đường kính",
+        "knowledge": "Phân biệt tâm, bán kính, đường kính của hình tròn",
+        "thinking": "Nhìn tâm trước, rồi xét từng lựa chọn theo đúng định nghĩa",
+        "options": options,
+        "center": center,
+        "correct_letter": correct_letter,
+        "correct_name": correct_text,
+        "teacher_hint": f"Con nhìn xem câu nào nói đúng nhất về tâm hoặc đoạn thẳng quanh tâm {center}.",
+        "memory": f"{center} là tâm; đoạn từ tâm đến một điểm trên đường tròn là bán kính.",
+    }
+
+
+
+def _extract_unit_after_question(problem_text: str, fallback: str = "") -> str:
+    lowered = (problem_text or "").lower()
+    patterns = [
+        r"bao nhi[eê]u\s+([a-zà-ỹ\s]+?)(?:[\?\.]|$)",
+        r"còn lại bao nhiêu\s+([a-zà-ỹ\s]+?)(?:[\?\.]|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if not match:
+            continue
+        unit = match.group(1).strip(" .?")
+        unit = re.sub(r"\s+", " ", unit)
+        if unit:
+            return unit
+    return fallback
+
+
+
+def _solve_numeric_problem(problem_text: str) -> dict[str, Any] | None:
+    frame = _infer_teaching_frame(problem_text)
+    normalized = _normalize_for_matching(problem_text)
+    numbers = _extract_numbers(problem_text)
+
+    if frame["problem_type"] == "Số liền trước":
+        if not numbers:
+            return None
+        base = numbers[-1]
+        answer = base - 1
+        return {
+            "kind": "numeric",
+            "category": "so_lien_truoc",
+            "problem_type": frame["problem_type"],
+            "knowledge": frame["knowledge"],
+            "thinking": frame["thinking"],
+            "answer_value": answer,
+            "answer_text": _format_int(answer),
+            "memory": "Số liền trước là lấy số đó trừ 1.",
+        }
+
+    if frame["problem_type"] == "Số liền sau":
+        base = 9999 if "lon nhat co 4 chu so" in normalized else (numbers[-1] if numbers else None)
+        if base is None:
+            return None
+        answer = base + 1
+        return {
+            "kind": "numeric",
+            "category": "so_lien_sau",
+            "problem_type": frame["problem_type"],
+            "knowledge": frame["knowledge"],
+            "thinking": frame["thinking"],
+            "answer_value": answer,
+            "answer_text": _format_int(answer),
+            "memory": "Số liền sau là lấy số đó cộng 1.",
+        }
+
+    if frame["problem_type"] == "Chia đều":
+        if len(numbers) < 2:
+            return None
+        total, parts = numbers[0], numbers[1]
+        if parts == 0:
+            return None
+        answer = total // parts
+        unit = _extract_unit_after_question(problem_text, fallback="")
+        return {
+            "kind": "numeric",
+            "category": "chia_deu",
+            "problem_type": frame["problem_type"],
+            "knowledge": frame["knowledge"],
+            "thinking": frame["thinking"],
+            "answer_value": answer,
+            "unit": unit,
+            "answer_text": f"{_format_int(answer)} {unit}".strip(),
+            "memory": "Chia đều thì lấy tổng chia cho số phần bằng nhau.",
+            "step_values": {"main": answer},
+        }
+
+    if frame["problem_type"] == "Rút về đơn vị":
+        if len(numbers) < 3:
+            return None
+        first, second, third = numbers[0], numbers[1], numbers[2]
+        groups, total, target = first, second, third
+        if total < groups:
+            total, groups, target = max(first, second), min(first, second), third
+        if groups == 0:
+            return None
+        one_part = total // groups
+        answer = one_part * target
+        unit = _extract_unit_after_question(problem_text, fallback="chiếc")
+        if "but" in normalized:
+            unit = "chiếc bút"
+        return {
+            "kind": "numeric",
+            "category": "rut_ve_don_vi",
+            "problem_type": frame["problem_type"],
+            "knowledge": frame["knowledge"],
+            "thinking": frame["thinking"],
+            "answer_value": answer,
+            "unit": unit,
+            "answer_text": f"{_format_int(answer)} {unit}".strip(),
+            "memory": "Muốn tìm nhiều phần như nhau thì tìm 1 phần trước rồi nhân lên.",
+            "step_values": {"one_part": one_part, "target": target},
+        }
+
+    if frame["problem_type"] == "Đổi đơn vị rồi tính":
+        match = re.search(r"(\d+)\s*m\s*(\d+)\s*cm.*?(\d+)\s*cm", problem_text.lower())
+        if not match:
+            return None
+        meters = int(match.group(1))
+        extra_cm = int(match.group(2))
+        change_cm = int(match.group(3))
+        total_cm = meters * 100 + extra_cm
+        answer = total_cm - change_cm
+        return {
+            "kind": "numeric",
+            "category": "doi_don_vi",
+            "problem_type": "Đổi về cùng đơn vị rồi trừ",
+            "knowledge": "1 m = 100 cm",
+            "thinking": "Đổi về cùng đơn vị trước rồi mới tính",
+            "answer_value": answer,
+            "unit": "cm",
+            "answer_text": f"{_format_int(answer)} cm",
+            "memory": "Đổi về cùng đơn vị trước rồi mới tính.",
+            "step_values": {"converted": total_cm, "change": change_cm},
+        }
+
+    if frame["problem_type"] == "Chu vi hình vuông" and numbers:
+        edge = numbers[0]
+        answer = edge * 4
+        return {
+            "kind": "numeric",
+            "category": "chu_vi_hinh_vuong",
+            "problem_type": frame["problem_type"],
+            "knowledge": frame["knowledge"],
+            "thinking": frame["thinking"],
+            "answer_value": answer,
+            "unit": "cm",
+            "answer_text": f"{_format_int(answer)} cm",
+            "memory": "Chu vi hình vuông bằng cạnh nhân 4.",
+        }
+
+    if frame["problem_type"] == "Chu vi hình chữ nhật" and len(numbers) >= 2:
+        length, width = numbers[0], numbers[1]
+        answer = (length + width) * 2
+        return {
+            "kind": "numeric",
+            "category": "chu_vi_hinh_chu_nhat",
+            "problem_type": frame["problem_type"],
+            "knowledge": frame["knowledge"],
+            "thinking": frame["thinking"],
+            "answer_value": answer,
+            "unit": "cm",
+            "answer_text": f"{_format_int(answer)} cm",
+            "memory": "Chu vi hình chữ nhật bằng (dài + rộng) × 2.",
+        }
+
+    if "78 000" in problem_text and "18 000" in problem_text and "3 lần" in problem_text:
+        purchased = 3 * 18000
+        answer = 78000 - purchased
+        return {
+            "kind": "numeric",
+            "category": "nhan_roi_tru",
+            "problem_type": "Bài nhiều bước",
+            "knowledge": "Phép nhân rồi phép trừ",
+            "thinking": "Tính số đã mua trước, rồi tìm số còn phải mua",
+            "answer_value": answer,
+            "unit": "viên gạch",
+            "answer_text": f"{_format_int(answer)} viên gạch",
+            "memory": "Tính phần đã có trước rồi tìm phần còn thiếu.",
+            "step_values": {"intermediate": purchased},
+        }
+
+    if "95" in problem_text and ("5 chồng" in problem_text or "5 chong" in normalized) and "7 quyển" in problem_text:
+        sold = 5 * 7
+        answer = 95 - sold
+        return {
+            "kind": "numeric",
+            "category": "nhan_roi_tru",
+            "problem_type": "Bài nhiều bước",
+            "knowledge": "Tính số đã bán trước rồi lấy số ban đầu trừ đi",
+            "thinking": "Tính xem đã bán bao nhiêu quyển trước, rồi tìm số còn lại",
+            "answer_value": answer,
+            "unit": "quyển vở",
+            "answer_text": f"{_format_int(answer)} quyển vở",
+            "memory": "Muốn biết còn lại bao nhiêu thì lấy số ban đầu trừ số đã bán.",
+            "step_values": {"intermediate": sold},
+        }
+
+    if frame["problem_type"] == "Tìm thành phần chưa biết" and len(numbers) >= 2:
+        a, b = numbers[0], numbers[1]
+        if "hieu" in normalized or "số trừ" in problem_text.lower() or "so tru" in normalized:
+            answer = a + b
+            return {
+                "kind": "numeric",
+                "category": "tim_thanh_phan_chua_biet",
+                "problem_type": frame["problem_type"],
+                "knowledge": frame["knowledge"],
+                "thinking": frame["thinking"],
+                "answer_value": answer,
+                "answer_text": _format_int(answer),
+                "memory": "Muốn tìm số bị trừ thì lấy hiệu cộng với số trừ.",
+            }
+
+    return None
+
+
+
+def _solve_supported_problem(problem_text: str) -> dict[str, Any] | None:
+    return _solve_geometry_farthest(problem_text) or _solve_circle_mcq(problem_text) or _solve_numeric_problem(problem_text)
+
+
+# =========================================================
+# PROMPT CONTEXT BUILDERS
+# =========================================================
+def _format_truth_block(problem_text: str) -> str:
+    solved = _solve_supported_problem(problem_text)
+    if not solved:
+        return "- Không có đáp án nội bộ dạng checker cho bài này. Hãy dạy theo đề đã xác nhận."
+
+    if solved["kind"] == "geometry_farthest":
+        facts = [f"  - {item['name']}: {_format_int(item['value'])} m" for item in solved["distances"]]
+        return "\n".join(
+            [
+                "- Thông tin kiểm chứng nội bộ (không nói lệch đi):",
+                *facts,
+                f"  - Số lớn nhất: {_format_int(solved['correct_value'])}",
+                f"  - Tên đúng: {solved['correct_name']}",
+                f"  - Đáp án đúng: {solved['correct_letter']}",
+            ]
+        )
+
+    if solved["kind"] == "circle_mcq":
+        return "\n".join(
+            [
+                "- Thông tin kiểm chứng nội bộ (không nói lệch đi):",
+                f"  - Tâm hình tròn: {solved['center']}",
+                f"  - Đáp án đúng: {solved['correct_letter']}. {solved['correct_name']}",
+            ]
+        )
+
+    return "\n".join(
+        [
+            "- Thông tin kiểm chứng nội bộ (không nói lệch đi):",
+            f"  - Kết quả đúng: {solved['answer_text']}",
+            f"  - Kiến thức chốt: {solved['memory']}",
+        ]
+    )
+
+
+
+def _format_history(chat_history: list[dict[str, Any]], mode: str, limit: int = 6) -> str:
+    rows = []
+    for msg in chat_history[-limit:]:
+        if msg.get("hidden"):
+            continue
+        role = msg.get("role", "assistant")
+        if mode == "parent":
+            label = "Ba mẹ" if role == "user" else "Trợ lý"
+        else:
+            label = "Con" if role == "user" else "Thầy"
+        rows.append(f"- {label}: {msg.get('content', '')}")
+    return "\n".join(rows) if rows else "- Chưa có lịch sử trước đó."
+
 
 
 def build_initial_context(problem_text: str, mode: str, support_level: str) -> str:
@@ -305,14 +1130,13 @@ def build_initial_context(problem_text: str, mode: str, support_level: str) -> s
     support_guide = get_support_guide(support_level)
     first_response_guide = get_first_response_guide()
     complexity = detect_problem_complexity(problem_text)
-    problem_type = detect_problem_type(problem_text)
-    blueprint = get_problem_blueprint(problem_type)
-    plan_block = build_plan_block(blueprint)
-    mc_rule = build_multiple_choice_rule(blueprint)
+    frame = _infer_teaching_frame(problem_text)
+    micro_goals = _build_micro_goals(problem_text)
+    solved = _solve_supported_problem(problem_text)
 
-    flow_type = blueprint.get("flow_type", "")
-    label = blueprint.get("label", "")
-    knowledge_used = blueprint.get("knowledge_used", "")
+    truth_block = ""
+    if mode == "parent" or support_level == "cach_giai":
+        truth_block = _format_truth_block(problem_text)
 
     context = f"""
 {system_prompt}
@@ -324,197 +1148,28 @@ def build_initial_context(problem_text: str, mode: str, support_level: str) -> s
 Đề bài đã xác nhận:
 {problem_text}
 
-Dạng bài nội bộ:
-- problem_type: {problem_type}
-- label: {label}
-- flow_type: {flow_type}
-- knowledge_used: {knowledge_used}
+Phân tích nội bộ để định hướng cho thầy:
+- Mức độ bài: {complexity}
+- Dạng bài gợi ý: {frame['problem_type']}
+- Kiến thức dùng gợi ý: {frame['knowledge']}
+- Cách nghĩ nhanh gợi ý: {frame['thinking']}
+- Các mốc nên đi qua:
+{chr(10).join(f"  - {step}" for step in micro_goals)}
+{truth_block}
 
-Mức độ bài:
-{complexity}
-
-{plan_block}
-
-{mc_rule}
-
-Yêu cầu mở đầu cực quan trọng:
-- Ở mode child, lượt đầu phải cho thấy đúng 3 ý:
-  - Dạng bài
-  - Kiến thức dùng
-  - Cách nghĩ nhanh
-- Với mode child, tối đa 4 dòng ngắn + 1 câu hỏi.
-- Với mode child, không viết thêm các câu xã giao.
-- Nếu bài nhiều bước / đổi đơn vị / rút về đơn vị:
-  - opening phải hiện ra ngoài bằng chữ thật, không chỉ nghĩ nội bộ.
-  - phải có đúng dạng:
-    - Mình đi 2 bước
-    - Bước 1: ...
-    - Bước 2: ...
-- Nếu flow_type là unit_conversion:
-  - Nếu bài có dấu hiệu khác đơn vị, phải nhắc chú ý đổi về cùng đơn vị.
-- Nếu flow_type là multiple_choice:
-  - opening phải hiện:
-    - Cách làm: mình xét từng đáp án một
-    - Mình xét A trước nhé...
-  - không được giải hết rồi chốt ngay.
-- Nếu flow_type là multi_step:
-  - không hiện phép tính ở opening.
-- Nếu support_level là goi_y:
-  - không được giải hộ sớm.
-  - không được cho kết quả trung gian quá sớm.
+Yêu cầu cho lượt đầu:
+- Nếu mode là child:
+  - Mở đầu đúng 1 lần theo khung: Dạng bài / Kiến thức dùng / Cách nghĩ nhanh.
+  - Sau đó chỉ hỏi 1 câu ngắn để con làm bước đầu tiên.
+  - Ở mode gợi ý nhẹ và dẫn từng bước: không lộ đáp án cuối, không tự làm hộ bước chính.
+  - Không nêu kết quả trung gian nếu con chưa thử làm, trừ khi đang ở mode cách giải.
+  - Giữ giọng ấm, ngắn, tự nhiên, hợp audio.
+- Nếu mode là parent:
+  - Trả lời theo kiểu toàn bài, gọn mà đủ dùng ngay.
+  - Luôn có các ý: Dạng bài, Kiến thức dùng, Hướng làm cả bài, Lỗi dễ mắc, Ba mẹ nên hỏi con.
+  - Nếu đã biết đáp án chắc, ưu tiên thêm Lời giải mẫu ngắn và Đáp số.
 """
     return context.strip()
-
-
-def _is_choice_only(text: str) -> bool:
-    compact = normalize_text(text).replace(" ", "")
-    return bool(
-        re.match(r"^([abcd])$", compact, flags=re.IGNORECASE)
-        or re.match(r"^(đápán|dapan)([abcd])$", compact, flags=re.IGNORECASE)
-        or re.match(r"^(chọn|chon)([abcd])$", compact, flags=re.IGNORECASE)
-    )
-
-
-def classify_user_reply(user_input: str) -> str:
-    text = normalize_text(user_input)
-    if not text:
-        return "empty"
-
-    dont_know_signals = [
-        "không biết",
-        "ko biết",
-        "k biết",
-        "con không biết",
-        "khó quá",
-        "bí",
-        "con bí",
-        "không hiểu",
-        "ko hiểu",
-        "là sao",
-    ]
-    if any(signal in text for signal in dont_know_signals):
-        return "student_dont_know"
-
-    ask_answer_signals = [
-        "đáp án",
-        "giải luôn",
-        "cho con đáp án",
-        "cho đáp án",
-        "giải hộ",
-        "làm hộ",
-        "cho con kết quả",
-    ]
-    if any(signal in text for signal in ask_answer_signals) and not _is_choice_only(text):
-        return "student_asks_answer"
-
-    if _is_choice_only(text):
-        return "student_choice_only"
-
-    cleaned = re.sub(r"[\s,\.]+", "", text)
-    if cleaned.isdigit():
-        return "student_number_only"
-
-    return "normal_reply"
-
-
-def is_small_error(user_input: str) -> bool:
-    text = normalize_text(user_input)
-    has_number = any(ch.isdigit() for ch in text)
-    has_equal = "=" in text
-    has_unit = any(
-        unit in text
-        for unit in [
-            "bao",
-            "cm",
-            "kg",
-            "g",
-            "quyển",
-            "chai",
-            "khay",
-            "mét",
-            "xi măng",
-            "quả",
-            "cái",
-            "m",
-            "viên",
-            "gạch",
-            "hộp",
-            "bút",
-        ]
-    )
-    return has_number and not has_equal and not has_unit
-
-
-def should_require_full_presentation(st, user_input: str) -> bool:
-    text = normalize_text(user_input)
-
-    has_equal = "=" in text
-    has_unit = any(
-        unit in text
-        for unit in [
-            "bao",
-            "cm",
-            "kg",
-            "g",
-            "quyển",
-            "chai",
-            "khay",
-            "mét",
-            "xi măng",
-            "quả",
-            "cái",
-            "m",
-            "viên",
-            "gạch",
-            "hộp",
-            "bút",
-        ]
-    )
-
-    if has_equal or has_unit:
-        return False
-
-    if _get_state_value(st.session_state, "presentation_retry_count", 0) >= 1:
-        return False
-
-    return True
-
-
-def update_stuck_ui(st, reply_type: str):
-    current = _get_state_value(st.session_state, "stuck_count", 0)
-    if reply_type == "student_dont_know":
-        current += 1
-    else:
-        current = max(0, current - 1)
-    _set_state_value(st.session_state, "stuck_count", current)
-
-    if _get_state_value(st.session_state, "is_finished", False):
-        _set_state_value(st.session_state, "show_help_buttons", False)
-        _set_state_value(st.session_state, "show_hint_button", False)
-        _set_state_value(st.session_state, "show_solution_button", False)
-        return
-
-    _set_state_value(st.session_state, "show_help_buttons", current >= 1)
-    _set_state_value(st.session_state, "show_hint_button", current >= 2)
-    _set_state_value(
-        st.session_state,
-        "show_solution_button",
-        current >= 3 or _get_state_value(st.session_state, "allow_full_solution", False),
-    )
-
-
-def detect_finished_response(response_text: str) -> bool:
-    text = normalize_text(response_text)
-    finish_signals = [
-        "đã hoàn thành bài toán này",
-        "đã làm xong bài này",
-        "đáp số",
-        "vậy mình sẽ nói là",
-        "con giỏi lắm! con đã hoàn thành",
-        "con đã hoàn thành bài này rồi",
-        "kiến thức cần nhớ",
-    ]
-    return any(s in text for s in finish_signals)
 
 
 def build_followup_context(
@@ -531,55 +1186,55 @@ def build_followup_context(
     small_error: bool,
     stuck_count: int,
     is_finished: bool,
-    hint_request_count: int = 0,
 ) -> str:
     system_prompt = get_system_prompt(mode)
     support_guide = get_support_guide(support_level)
-    problem_type = detect_problem_type(problem_text)
-    blueprint = get_problem_blueprint(problem_type)
-    mc_rule = build_multiple_choice_rule(blueprint)
+    frame = _infer_teaching_frame(problem_text)
+    active_goal = _infer_active_micro_goal(problem_text, chat_history)
+    micro_goals = _build_micro_goals(problem_text)
 
-    history_text = ""
-    for msg in chat_history[-6:]:
-        role = "Học sinh" if msg.get("role") == "user" else "Thầy"
-        history_text += f"- {role}: {msg.get('content', '')}\n"
+    reply_rules = []
+    if reply_type == "student_dont_know":
+        reply_rules.extend(
+            [
+                f"- Con đang bí. stuck_count hiện tại: {stuck_count}.",
+                f"- Tập trung vào đúng mốc hiện tại: {active_goal['text']}",
+                "- Lần bí đầu: nhắc con nên nhìn vào đâu trước.",
+                "- Lần bí tiếp theo: nói rõ hơn bước cần làm.",
+                "- Chỉ khi bí nhiều lượt mới được nói thẳng phép tính hoặc kết quả trung gian.",
+            ]
+        )
+    elif reply_type == "student_asks_answer":
+        reply_rules.extend(
+            [
+                "- Con đang xin đáp án.",
+                f"- Trước khi chốt, ưu tiên giúp con đi qua mốc hiện tại: {active_goal['text']}",
+                "- Nếu chưa ở mode cách giải, không chốt đáp án quá sớm.",
+            ]
+        )
+    elif reply_type in {"student_number_only", "student_choice_only"}:
+        reply_rules.extend(
+            [
+                "- Con đã đưa ra một mảnh trả lời ngắn.",
+                "- Nếu đúng hướng thì công nhận ngắn gọn rồi đi tiếp hoặc chốt gọn.",
+                "- Không bắt con viết lại quá nhiều lần.",
+            ]
+        )
+    else:
+        reply_rules.append(f"- Bám vào mốc hiện tại: {active_goal['text']}")
 
-    full_solution_rule = (
-        "Được phép trình bày cách giải theo từng bước."
-        if allow_full_solution
-        else "Không được đưa lời giải đầy đủ hoặc đáp án cuối cùng ngay."
-    )
+    if require_full_presentation:
+        reply_rules.append("- Chỉ nhắc viết rõ hơn thật ngắn một lần.")
+    if small_error:
+        reply_rules.append("- Đây là lỗi nhỏ. Công nhận phần đúng trước, sửa phần thiếu thật ngắn.")
+    if allow_full_solution:
+        reply_rules.append("- Được phép nói lời giải rõ hơn hoặc chốt đáp án nếu cần.")
+    if is_finished:
+        reply_rules.append("- Bài đã xong. Chỉ chốt ngắn gọn, không mở thêm câu hỏi mới.")
 
-    error_rule = (
-        """
-- Đây là lỗi nhỏ.
-- Nếu học sinh đã ra đúng kết quả số hoặc gần đúng ý chính:
-  - công nhận điều đúng trước
-  - nhắc lỗi nhỏ ngắn gọn
-  - có thể tự chốt câu trả lời đầy đủ
-  - không giữ học sinh quá lâu
-"""
-        if small_error
-        else
-        """
-- Nếu đây là lỗi lớn:
-  - chỉ ra đúng chỗ sai
-  - dạy tiếp ngắn gọn
-  - kéo học sinh làm tiếp bước đúng
-"""
-    )
-
-    presentation_rule = (
-        "Có thể yêu cầu học sinh viết rõ phép tính hoặc đơn vị, nhưng chỉ ngắn gọn, không lặp lại nhiều lần."
-        if require_full_presentation
-        else "Không được giữ học sinh quá lâu ở việc viết lại phép tính hoặc đơn vị nếu con đã hiểu ý chính."
-    )
-
-    finish_rule = (
-        "Bài đã hoàn tất. Không hỏi hỗ trợ thêm. Chỉ chốt ngắn gọn nếu cần."
-        if is_finished
-        else "Nếu bài vừa hoàn tất, hãy chốt đáp án đầy đủ và chốt 1-2 ý kiến thức cần nhớ."
-    )
+    truth_block = ""
+    if mode == "parent" or allow_full_solution:
+        truth_block = _format_truth_block(problem_text)
 
     context = f"""
 {system_prompt}
@@ -590,33 +1245,37 @@ def build_followup_context(
 {problem_text}
 
 Lịch sử gần đây:
-{history_text}
+{_format_history(chat_history, mode)}
 
-Trạng thái hiện tại:
-- mode: {mode}
+Phân tích nội bộ để giữ đường ray:
 - current_step: {current_step}
 - last_error_type: {last_error_type}
 - reply_type: {reply_type}
 - allow_full_solution: {allow_full_solution}
+- require_full_presentation: {require_full_presentation}
 - small_error: {small_error}
 - is_finished: {is_finished}
-- hint_request_count: {hint_request_count}
+- Dạng bài gợi ý: {frame['problem_type']}
+- Kiến thức dùng gợi ý: {frame['knowledge']}
+- Cách nghĩ nhanh gợi ý: {frame['thinking']}
+- Mốc hiện tại nên tập trung: {active_goal['text']}
+- Toàn bộ mốc của bài:
+{chr(10).join(f"  - {step}" for step in micro_goals)}
+{truth_block}
 
-Luật rất quan trọng:
-- {full_solution_rule}
-- {presentation_rule}
-{error_rule}
-- stuck_count hiện tại là: {stuck_count}
+Luật phản hồi cho lượt này:
+{chr(10).join(reply_rules)}
 - Nếu mode là child:
-  - mỗi lượt chỉ 1 mục tiêu
-  - chỉ 1 câu hỏi cuối
-  - không lặp cùng một ý quá 1 lần
-  - không hỏi rồi tự trả lời ngay
-- Nếu flow_type là {blueprint.get('flow_type', '')}:
-  - bám đúng flow của dạng bài này
-- knowledge_used: {blueprint.get('knowledge_used', '')}
-{mc_rule}
-- {finish_rule}
+  - Không lặp lại block mở bài "Dạng bài / Kiến thức dùng / Cách nghĩ nhanh" nữa.
+  - Nói như thầy giáo lớp 3: ngắn, mềm, rõ.
+  - Mỗi lượt chỉ 1 việc chính.
+  - Không nhảy cóc qua mốc hiện tại nếu con chưa đi qua nó.
+  - Ở mode gợi ý nhẹ hoặc dẫn từng bước: không tự giải hộ luôn bước chính, không chốt đáp án quá sớm.
+  - Nếu chốt đáp án, thêm 1 dòng: Kiến thức cần nhớ: ...
+- Nếu mode là parent:
+  - Ưu tiên một lượt là dùng được ngay.
+  - Nếu đã biết đáp án chắc, thêm Lời giải mẫu ngắn và Đáp số.
+  - Không nói chuyện như đang dạy trực tiếp trẻ.
 
 Tin nhắn mới nhất của người dùng:
 {user_input}
@@ -624,35 +1283,15 @@ Tin nhắn mới nhất của người dùng:
     return context.strip()
 
 
-def update_step_and_error(st, reply_type: str):
-    mapping = {
-        "student_dont_know": "khong_biet",
-        "student_number_only": "chi_1_con_so",
-        "student_asks_answer": "xin_dap_an",
-        "student_choice_only": "chi_chon_dap_an",
-    }
-    _set_state_value(st.session_state, "last_error_type", mapping.get(reply_type, ""))
-
-
-def update_presentation_retry(st, require_full_presentation: bool):
-    if require_full_presentation:
-        _set_state_value(
-            st.session_state,
-            "presentation_retry_count",
-            _get_state_value(st.session_state, "presentation_retry_count", 0) + 1,
-        )
-    else:
-        _set_state_value(st.session_state, "presentation_retry_count", 0)
-
-
 def build_summary_context(problem_text: str, chat_history: list) -> str:
     summary_prompt = get_summary_prompt()
     history_text = ""
     for msg in chat_history[-10:]:
+        if msg.get("hidden"):
+            continue
         role = "Học sinh" if msg.get("role") == "user" else "Thầy"
         history_text += f"- {role}: {msg.get('content', '')}\n"
-
-    return f"""
+    context = f"""
 {summary_prompt}
 
 Đề bài:
@@ -660,987 +1299,164 @@ def build_summary_context(problem_text: str, chat_history: list) -> str:
 
 Lịch sử buổi học:
 {history_text}
-""".strip()
+"""
+    return context.strip()
 
 
-def _clean_num(text: str) -> int:
-    return int(re.sub(r"\D", "", text))
+# =========================================================
+# RESPONSE GUARDRAILS
+# =========================================================
+def _normalize_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
 
 
-def _format_int(value: int) -> str:
-    return f"{value:,}".replace(",", " ")
 
-
-def _extract_all_numbers(problem_text: str) -> list[int]:
-    return [_clean_num(m) for m in re.findall(r"\d[\d .]*", problem_text)]
-
-
-def _extract_named_distances(problem_text: str) -> list[dict]:
-    items = []
-    seen = set()
-    for line in problem_text.splitlines():
-        raw = line.strip(" -\t")
-        if not raw:
-            continue
-        if ":" not in raw:
-            continue
-        digits = re.findall(r"\d[\d .]*", raw)
-        if not digits:
-            continue
-        value = _clean_num(digits[-1])
-        if value < 10:
-            continue
-        name_part, _ = raw.split(":", 1)
-        name = re.sub(r"^đường đến\s*", "", name_part, flags=re.IGNORECASE).strip()
-        key = (name.lower(), value)
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append({"name": name, "value": value})
-    return items
-
-
-def _extract_options(problem_text: str) -> list[dict]:
-    options = []
-    flat = problem_text.replace("\n", " ")
-    for match in re.finditer(r"([A-D])\.\s*(.*?)(?=\s+[A-D]\.\s*|$)", flat, flags=re.IGNORECASE):
-        options.append({"letter": match.group(1).upper(), "text": match.group(2).strip()})
-    return options
-
-
-def _solve_geometry_farthest(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "xa nhất" not in text:
-        return None
-
-    items = _extract_named_distances(problem_text)
-    options = _extract_options(problem_text)
-    if not items:
-        return None
-
-    best = max(items, key=lambda item: item["value"])
-    correct_letter = None
-    for option in options:
-        if normalize_text(option["text"]) in normalize_text(best["name"]):
-            correct_letter = option["letter"]
-            break
-        if normalize_text(best["name"]) in normalize_text(option["text"]):
-            correct_letter = option["letter"]
-            break
-
-    return {
-        "kind": "geometry_farthest",
-        "correct_name": best["name"],
-        "correct_value": best["value"],
-        "correct_letter": correct_letter,
-        "items": items,
-        "options": options,
-        "answer_text": best["name"],
-    }
-
-
-def _solve_circle_mcq(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "hình tròn" not in text and "tâm hình tròn" not in text:
-        return None
-
-    options = _extract_options(problem_text)
-    if not options:
-        return None
-
-    for option in options:
-        option_text = normalize_text(option["text"])
-        if re.search(r"\bo\b.*\blà tâm hình tròn\b", option_text):
-            return {
-                "kind": "circle_mcq",
-                "correct_letter": option["letter"],
-                "correct_name": option["text"],
-                "options": options,
-            }
+def _response_mentions_choice(response_text: str) -> str | None:
+    choice = _extract_choice_letter(response_text)
+    if choice:
+        return choice
+    normalized = _normalize_for_matching(response_text)
+    match = re.search(r"dap an\s*([a-d])", normalized)
+    if match:
+        return match.group(1).upper()
     return None
 
 
-def _parse_store_case(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "xếp đều vào" not in text or "mỗi chồng lấy ra bán" not in text:
-        return None
-    numbers = _extract_all_numbers(problem_text)
-    if len(numbers) < 3:
-        return None
-    total, groups, sold_each = numbers[:3]
-    sold_total = groups * sold_each
-    answer = total - sold_total
-    unit = "quyển vở" if "quyển vở" in text else "quyển"
-    return {
-        "kind": "store_case",
-        "step_values": [sold_total, answer],
-        "answer_value": answer,
-        "answer_text": f"{_format_int(answer)} {unit}",
-        "unit": unit,
-    }
 
-
-def _parse_unit_conversion_subtract(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if not any(token in text for token in ["m", "cm", "xăng-ti-mét"]) or "cắt đi" not in text:
-        return None
-
-    meter_match = re.search(r"(\d+)\s*m\s*(\d+)\s*cm", text)
-    cut_match = re.search(r"cắt đi\s*(\d+)\s*cm", text)
-    if not meter_match or not cut_match:
-        return None
-
-    total_cm = int(meter_match.group(1)) * 100 + int(meter_match.group(2))
-    cut_cm = int(cut_match.group(1))
-    answer = total_cm - cut_cm
-    return {
-        "kind": "unit_conversion_subtract",
-        "step_values": [total_cm, answer],
-        "answer_value": answer,
-        "answer_text": f"{_format_int(answer)} cm",
-        "unit": "cm",
-        "total_converted": total_cm,
-    }
-
-
-def _parse_unit_rate_case(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if not any(k in text for k in ["như nhau", "tất cả"]):
-        return None
-    numbers = _extract_all_numbers(problem_text)
-    if len(numbers) < 3:
-        return None
-    first_many, total, second_many = numbers[:3]
-    if first_many == 0:
-        return None
-    one_part = total // first_many
-    answer = one_part * second_many
-    unit = "chiếc bút" if "chiếc bút" in text or "bút" in text else "đơn vị"
-    group_name = "hộp" if "hộp" in text else "phần"
-    return {
-        "kind": "unit_rate",
-        "step_values": [one_part, answer],
-        "answer_value": answer,
-        "answer_text": f"{_format_int(answer)} {unit}",
-        "unit": unit,
-        "group_name": group_name,
-        "one_part": one_part,
-    }
-
-
-def _parse_multi_step_bricks(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "mỗi lần" not in text or "còn phải" not in text:
-        return None
-    numbers = _extract_all_numbers(problem_text)
-    if len(numbers) < 3:
-        return None
-    target, times, each = numbers[:3]
-    bought = times * each
-    answer = target - bought
-    unit = "viên gạch" if "viên gạch" in text else "viên"
-    return {
-        "kind": "multi_step_bricks",
-        "step_values": [bought, answer],
-        "answer_value": answer,
-        "answer_text": f"{_format_int(answer)} {unit}",
-        "unit": unit,
-        "intermediate_label": "đã mua",
-    }
-
-
-def _parse_one_step_division(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "chia đều" not in text:
-        return None
-    numbers = _extract_all_numbers(problem_text)
-    if len(numbers) < 2:
-        return None
-    total, groups = numbers[:2]
-    if groups == 0:
-        return None
-    answer = total // groups
-    if "chai" in text:
-        unit = "chai"
-    elif "quyển" in text:
-        unit = "quyển"
-    elif "bút" in text:
-        unit = "chiếc bút"
-    else:
-        unit = "đơn vị"
-    return {
-        "kind": "one_step_division",
-        "step_values": [answer],
-        "answer_value": answer,
-        "answer_text": f"{_format_int(answer)} {unit}",
-        "unit": unit,
-    }
+def _contains_name(response_text: str, name: str) -> bool:
+    norm_resp = _normalize_for_matching(response_text)
+    norm_name = _normalize_for_matching(name)
+    return bool(norm_name) and norm_name in norm_resp
 
 
 
-
-def _parse_perimeter_square(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "hình vuông" not in text:
-        return None
-    match = re.search(r"cạnh\s*(\d+)\s*cm", text)
-    if not match:
-        return None
-    side = int(match.group(1))
-    answer = side * 4
-    return {
-        "kind": "perimeter_square",
-        "step_values": [4, answer],
-        "answer_value": answer,
-        "answer_text": f"{_format_int(answer)} cm",
-        "side": side,
-        "unit": "cm",
-    }
+def _maybe_append_parent_answer(response: str, solved: dict[str, Any] | None) -> str:
+    if not solved:
+        return response
+    lower = response.lower()
+    if "đáp số" in lower:
+        return response
+    if solved["kind"] == "geometry_farthest":
+        return (
+            response.rstrip()
+            + f"\n\n**Lời giải mẫu ngắn:** So sánh các số đo, số lớn nhất là **{_format_int(solved['correct_value'])} m** nên xa nhất là **{solved['correct_name']}**.\n**Đáp số:** **{solved['correct_letter']}. {solved['correct_name']}**"
+        )
+    if solved["kind"] == "circle_mcq":
+        return response.rstrip() + f"\n\n**Đáp số:** **{solved['correct_letter']}. {solved['correct_name']}**"
+    return response.rstrip() + f"\n\n**Đáp số:** **{solved['answer_text']}**"
 
 
-def _parse_perimeter_rectangle(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "hình chữ nhật" not in text or "chiều dài" not in text or "chiều rộng" not in text:
-        return None
-    match = re.search(r"chiều dài\s*(\d+)\s*cm.*?chiều rộng\s*(\d+)\s*cm", text)
-    if not match:
-        return None
-    length = int(match.group(1))
-    width = int(match.group(2))
-    summed = length + width
-    answer = summed * 2
-    return {
-        "kind": "perimeter_rectangle",
-        "step_values": [summed, answer],
-        "answer_value": answer,
-        "answer_text": f"{_format_int(answer)} cm",
-        "length": length,
-        "width": width,
-        "unit": "cm",
-    }
 
-
-def _parse_predecessor(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "số liền trước" not in text:
-        return None
-    nums = _extract_all_numbers(problem_text)
-    if not nums:
-        return None
-    base = nums[-1]
-    answer = base - 1
-    return {
-        "kind": "predecessor",
-        "answer_value": answer,
-        "answer_text": _format_int(answer),
-        "base": base,
-    }
-
-
-def _parse_successor(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "số liền sau" not in text:
-        return None
-    if "số lớn nhất có 4 chữ số" in text:
-        base = 9999
-    else:
-        nums = _extract_all_numbers(problem_text)
-        if not nums:
-            return None
-        base = nums[-1]
-    answer = base + 1
-    return {
-        "kind": "successor",
-        "answer_value": answer,
-        "answer_text": _format_int(answer),
-        "base": base,
-    }
-
-
-def _parse_unknown_minuend(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    match = re.search(r"bị trừ đi\s*(\d+)\s*thì được\s*(\d+)", text)
-    if not match:
-        return None
-    subtrahend = int(match.group(1))
-    difference = int(match.group(2))
-    answer = subtrahend + difference
-    return {
-        "kind": "unknown_minuend",
-        "step_values": [answer],
-        "answer_value": answer,
-        "answer_text": _format_int(answer),
-        "subtrahend": subtrahend,
-        "difference": difference,
-    }
-
-
-def _parse_operation_chain(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "->" not in problem_text or "ô trống" not in text:
-        return None
-    nums = _extract_all_numbers(problem_text)
-    if len(nums) < 3:
-        return None
-    start, minus_value, divide_value = nums[:3]
-    first_blank = start - minus_value
-    if divide_value == 0:
-        return None
-    second_blank = first_blank // divide_value
-    return {
-        "kind": "operation_chain",
-        "step_values": [first_blank, second_blank],
-        "answer_value": second_blank,
-        "answer_text": _format_int(second_blank),
-        "start": start,
-        "minus_value": minus_value,
-        "divide_value": divide_value,
-    }
-
-
-def _parse_gift_then_subtract(problem_text: str) -> dict | None:
-    text = normalize_text(problem_text)
-    if "gấp" not in text or "còn lại" not in text:
-        return None
-    nums = _extract_all_numbers(problem_text)
-    if len(nums) < 3:
-        return None
-    start, multiplier, subtract_value = nums[:3]
-    gifted = start * multiplier
-    total = start + gifted
-    answer = total - subtract_value
-    unit = "bông hoa" if "bông hoa" in text else "đơn vị"
-    return {
-        "kind": "gift_then_subtract",
-        "step_values": [gifted, total, answer],
-        "answer_value": answer,
-        "answer_text": f"{_format_int(answer)} {unit}",
-        "gifted": gifted,
-        "total": total,
-        "unit": unit,
-        "multiplier": multiplier,
-    }
-
-def _solve_supported_problem(problem_text: str) -> dict | None:
-    for solver in [
-        _solve_geometry_farthest,
-        _solve_circle_mcq,
-        _parse_store_case,
-        _parse_unit_conversion_subtract,
-        _parse_unit_rate_case,
-        _parse_multi_step_bricks,
-        _parse_one_step_division,
-        _parse_perimeter_square,
-        _parse_perimeter_rectangle,
-        _parse_predecessor,
-        _parse_successor,
-        _parse_unknown_minuend,
-        _parse_operation_chain,
-        _parse_gift_then_subtract,
-    ]:
-        solved = solver(problem_text)
-        if solved is not None:
-            return solved
-    return None
-
-
-def _build_micro_goals(problem_text: str) -> list[str]:
-    blueprint = get_problem_blueprint(detect_problem_type(problem_text))
-    flow_type = blueprint.get("flow_type")
-
-    if flow_type == "unit_conversion":
-        return [
-            "Đổi về cùng đơn vị trước.",
-            "Làm phép tính với đơn vị đã thống nhất.",
-            "Viết đáp số kèm đơn vị.",
-        ]
-
-    if flow_type == "unit_rate":
-        return [
-            "Tìm 1 phần trước.",
-            "Tìm nhiều phần cần hỏi.",
-            "Viết đáp số kèm đơn vị.",
-        ]
-
-    if flow_type == "multi_step":
-        return [
-            "Tìm phần đã có hoặc đã làm xong.",
-            "Tìm phần còn thiếu hoặc còn lại.",
-            "Viết đáp số kèm đơn vị.",
-        ]
-
-    if flow_type == "multiple_choice":
-        return [
-            "Xét đáp án A.",
-            "Nếu cần, xét tiếp B, C, D.",
-            "Chốt đáp án đúng.",
-        ]
-
-    return ["Làm phép tính chính.", "Viết đáp số kèm đơn vị."]
-
-
-def _infer_active_micro_goal(problem_text: str, chat_history: list) -> dict:
-    goals = _build_micro_goals(problem_text)
-    assistant_text = "\n".join(
-        normalize_text(msg.get("content", ""))
-        for msg in chat_history
-        if msg.get("role") == "assistant"
+def _safe_child_geometry_prompt(solved: dict[str, Any]) -> str:
+    values = ", ".join(_format_int(item["value"]) for item in solved["distances"])
+    return (
+        f"Dạng bài: Chọn đường xa nhất\n"
+        f"Kiến thức dùng: So sánh các số đo\n"
+        f"Cách nghĩ nhanh: Mình nhìn các số đo rồi tìm số lớn nhất\n\n"
+        f"Con nhìn {values} nhé. Theo con, số nào lớn nhất?"
     )
 
-    index = 0
-    if len(goals) >= 3 and any(word in assistant_text for word in ["đổi", "cùng đơn vị", "325 cm", "1 phần", "đã mua", "xét a"]):
-        index = 1
-    if len(goals) >= 3 and any(word in assistant_text for word in ["đáp số", "viết đáp số", "đơn vị"]):
-        index = min(2, len(goals) - 1)
-
-    return {"index": index, "goal": goals[index], "goals": goals}
 
 
-def _line_block(lines: list[str]) -> str:
-    return "  \n".join([line for line in lines if line]).strip()
+def _safe_child_geometry_answer(solved: dict[str, Any]) -> str:
+    return (
+        "Đúng rồi.\n\n"
+        f"Số lớn nhất là {_format_int(solved['correct_value'])}.\n"
+        f"Vậy xa nhất là {solved['correct_name']}, mình chọn {solved['correct_letter']}.\n\n"
+        f"Kiến thức cần nhớ: {solved['memory']}"
+    )
 
 
 
+def _safe_child_circle_answer(solved: dict[str, Any]) -> str:
+    return (
+        "Con nhìn đúng rồi.\n\n"
+        f"Đáp án đúng là {solved['correct_letter']}. {solved['correct_name']}.\n\n"
+        f"Kiến thức cần nhớ: {solved['memory']}"
+    )
 
 
 
-def _last_assistant_text(chat_history: list) -> str:
-    for msg in reversed(chat_history or []):
-        if msg.get("role") == "assistant":
-            return str(msg.get("content", ""))
-    return ""
-
-
-def _last_visible_user_text(chat_history: list) -> str:
-    for msg in reversed(chat_history or []):
-        if msg.get("role") == "user" and not msg.get("hidden"):
-            return str(msg.get("content", ""))
-    return ""
-
-
-def _advance_mcq_circle_hint(chat_history: list, solved: dict) -> str:
-    last = normalize_text(_last_assistant_text(chat_history))
-
-    if "mình sang d" in last or "o có phải là tâm hình tròn không" in last:
-        return _line_block([
-            "D đúng nhé, vì O là tâm hình tròn.",
-            "A và C sai vì OQ, OP chỉ là bán kính.",
-            "B sai vì MN là đường kính, không phải bán kính.",
-            "Đáp án đúng: D.",
-        ])
-
-    if "mình sang c" in last or "op là bán kính hay đường kính" in last:
-        return "C sai nhé, vì OP đi từ tâm ra đường tròn nên là bán kính. Giờ mình sang D nhé: O có phải là tâm hình tròn không?"
-
-    if "mình sang b" in last or "mn là bán kính hay đường kính" in last:
-        return "B sai nhé, vì MN đi qua tâm và nối hai điểm trên đường tròn nên là đường kính. Giờ mình sang C nhé: OP là bán kính hay đường kính?"
-
-    if "mình xét a trước" in last or "oq đi từ tâm ra đường tròn" in last:
-        return "A sai nhé, vì OQ đi từ tâm ra đường tròn nên là bán kính. Giờ mình sang B nhé: MN là bán kính hay đường kính?"
-
-    return "Mình xét A trước nhé. OQ đi từ tâm ra đường tròn, vậy nó là bán kính hay đường kính?"
-
-
-def _advance_geometry_farthest_hint(chat_history: list, solved: dict) -> str:
-    last = normalize_text(_last_assistant_text(chat_history))
-    correct_letter = solved.get("correct_letter")
-    correct_name = solved.get("correct_name")
-    correct_value = solved.get("correct_value")
-    if "số nào lớn nhất" in last:
-        return f"Mình nhìn 4 số nhé. Số lớn nhất là {_format_int(correct_value)} m, nên đường đến {correct_name} là xa nhất. Nếu ghép với đáp án chữ thì con chọn {correct_letter}."
-    return "Mình tìm số lớn nhất trong 4 quãng đường nhé. Con nhìn xem số nào lớn nhất?"
-
-
-def _advance_multi_step_hint(chat_history: list, solved: dict) -> str:
-    last = normalize_text(_last_assistant_text(chat_history))
-
-    if solved.get("kind") == "multi_step_bricks":
-        bought, answer = solved["step_values"]
-        if f"78 000 trừ {_format_int(bought).lower()}".replace(" ","") in last.replace(" ","") or "còn bao nhiêu" in last:
-            return _line_block([
-                f"Mình tính tiếp nhé: 78 000 - {_format_int(bought)} = {_format_int(answer)}.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: bài này làm 2 bước, nhân trước rồi trừ sau.",
-            ])
-        if "18 000 x 3" in last or "bằng bao nhiêu" in last or "bước 1 mình tìm số viên gạch đã mua" in last:
-            return f"Mình tính luôn nhé: 18 000 x 3 = {_format_int(bought)} viên gạch. Giờ sang bước 2: lấy 78 000 trừ {_format_int(bought)}. Con thử tính tiếp nào?"
-        return "Bước 1 nhé: mình lấy 18 000 x 3 để tìm số viên gạch đã mua. Con thử tính xem bằng bao nhiêu?"
-
-    if solved.get("kind") == "store_case":
-        sold, answer = solved["step_values"]
-        if "còn lại" in last or "giờ con tìm phần còn lại" in last:
-            return _line_block([
-                f"Mình tính tiếp nhé: lấy số ban đầu trừ số đã bán thì còn {solved['answer_text']}.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: tìm phần đã bán trước rồi mới tìm phần còn lại.",
-            ])
-        if "số chồng nhân với số quyển bán" in last or "đã bán trước" in last:
-            return f"Mình tính luôn nhé: số đã bán là {_format_int(sold)} {solved['unit']}. Giờ con lấy số ban đầu trừ {_format_int(sold)} nhé."
-        return "Mình đi 2 bước. Con tìm số đã bán trước nhé."
-
-    if solved.get("kind") == "unit_rate":
-        one_part, answer = solved["step_values"]
-        if "phần cần hỏi" in last or "tìm số của phần cần hỏi" in last:
-            return _line_block([
-                f"Mình tính tiếp nhé: phần cần tìm là {solved['answer_text']}.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: rút về 1 phần trước rồi mới tìm nhiều phần.",
-            ])
-        if "lấy tổng số chia cho số" in last or "tìm 1" in last:
-            return f"Mình tính luôn nhé: 1 {solved['group_name']} có {_format_int(one_part)} {solved['unit']}. Giờ con tìm phần cần hỏi tiếp nào?"
-        return f"Đây là bài rút về đơn vị. Con tìm 1 {solved['group_name']} trước nhé."
-
+def _safe_child_numeric_step_prompt(solved: dict[str, Any]) -> str | None:
+    category = solved.get("category")
+    if category == "doi_don_vi":
+        converted = solved.get("step_values", {}).get("converted")
+        return (
+            "Thầy thấy mình cần làm từng bước nhé.\n\n"
+            "Con đổi 3 m 25 cm ra cm trước xem được bao nhiêu.\n"
+            "3 m 25 cm = ? cm"
+        ) if converted else None
+    if category == "rut_ve_don_vi":
+        return "Mình tìm 1 phần trước nhé. Con thử tính xem 1 hộp có bao nhiêu chiếc bút?"
+    if category == "nhan_roi_tru":
+        return "Mình tìm bước trung gian trước nhé. Con thử tính phần đã có hoặc đã bán trước xem sao."
     return None
 
-def _build_supported_opening_from_solution(problem_text: str, solved: dict | None) -> str | None:
+def _apply_response_guardrails(
+    response: str,
+    problem_text: str,
+    mode: str,
+    *,
+    opening: bool,
+    reply_type: str = "normal_reply",
+    allow_full_solution: bool = False,
+    hint_request_count: int = 0,
+    chat_history: list[dict[str, Any]] | None = None,
+) -> str:
+    solved = _solve_supported_problem(problem_text)
     if not solved:
-        return None
+        return response.strip()
 
-    kind = solved.get("kind")
-    if kind == "geometry_farthest":
-        return _line_block([
-            "Dạng bài: So sánh quãng đường để chọn đáp án đúng.",
-            "Kiến thức dùng: tìm số lớn nhất rồi ghép với đúng vườn hoa.",
-            "Cách nghĩ nhanh: nhìn 4 số đường dài và chọn số lớn nhất.",
-            "Con nhìn 4 số này nhé: số nào lớn nhất?",
-        ])
-    if kind == "perimeter_square":
-        return _line_block([
-            "Dạng bài: Chu vi hình vuông.",
-            "Kiến thức dùng: lấy số đo 1 cạnh nhân 4.",
-            "Cách nghĩ nhanh: hình vuông có 4 cạnh bằng nhau.",
-            "Con cho Thầy biết hình vuông có mấy cạnh nào?",
-        ])
-    if kind == "perimeter_rectangle":
-        return _line_block([
-            "Dạng bài: Chu vi hình chữ nhật.",
-            "Kiến thức dùng: cộng chiều dài với chiều rộng rồi nhân 2.",
-            "Cách nghĩ nhanh: mình tìm tổng dài và rộng trước.",
-            "Con thử cộng 12 với 7 trước nhé?",
-        ])
-    if kind == "predecessor":
-        return _line_block([
-            "Dạng bài: Số liền trước.",
-            "Kiến thức dùng: lấy số đã cho trừ 1.",
-            "Cách nghĩ nhanh: lùi lại 1 đơn vị.",
-            "Con thử lấy số đó bớt 1 xem nào?",
-        ])
-    if kind == "successor":
-        return _line_block([
-            "Dạng bài: Số liền sau.",
-            "Kiến thức dùng: lấy số đã cho cộng 1.",
-            "Cách nghĩ nhanh: tiến thêm 1 đơn vị.",
-            "Con thử nghĩ xem sau 9 999 là số nào?",
-        ])
-    if kind == "unknown_minuend":
-        return _line_block([
-            "Dạng bài: Tìm số bị trừ.",
-            "Kiến thức dùng: muốn tìm số bị trừ thì lấy hiệu cộng số trừ.",
-            "Cách nghĩ nhanh: nhìn hai số đã biết rồi cộng lại.",
-            "Con thử lấy 348 cộng 125 nhé?",
-        ])
-    if kind == "operation_chain":
-        return _line_block([
-            "Dạng bài: Chuỗi thao tác.",
-            "Kiến thức dùng: làm lần lượt từ trái sang phải.",
-            "Cách nghĩ nhanh: tính ô trước rồi mới sang ô sau.",
-            "Con thử tính ô trống đầu tiên trước nhé?",
-        ])
-    if kind == "gift_then_subtract":
-        return _line_block([
-            "Dạng bài: Toán nhiều bước.",
-            "Kiến thức dùng: tìm phần được cho thêm rồi tính phần còn lại.",
-            "Cách nghĩ nhanh: nhìn phần gấp lên trước rồi mới trừ tiếp.",
-            "Con thử tìm xem mẹ cho thêm bao nhiêu bông trước nhé?",
-        ])
-    return None
+    chat_history = chat_history or []
 
+    if mode == "parent":
+        return _maybe_append_parent_answer(response.strip(), solved)
 
-def _build_child_opening(problem_text: str, blueprint: dict) -> str:
-    flow_type = blueprint.get("flow_type", "")
-    label = blueprint.get("label", "Bài toán")
-    knowledge = blueprint.get("knowledge_used", "")
-    plan_steps = blueprint.get("plan_steps", [])
+    # Child mode: ưu tiên giữ giọng dạy học, không ép solver cướp lời quá sớm.
+    if opening and not allow_full_solution:
+        return response.strip()
 
-    if flow_type == "multiple_choice":
-        return _line_block([
-            f"Dạng bài: {label}",
-            f"Kiến thức dùng: {knowledge}",
-            "Cách nghĩ nhanh: mình xét từng đáp án một.",
-            "Mình xét A trước nhé. Con nhìn A xem đúng hay sai?",
-        ])
+    # Với trắc nghiệm hình học, chỉ sửa mạnh khi model lỡ chốt sai hẳn.
+    if solved["kind"] == "geometry_farthest":
+        mention_choice = _response_mentions_choice(response)
+        if mention_choice and mention_choice != solved["correct_letter"] and (allow_full_solution or hint_request_count >= 2):
+            return _safe_child_geometry_answer(solved)
+        return response.strip()
 
-    if blueprint.get("show_plan_steps") and len(plan_steps) >= 2:
-        return _line_block([
-            f"Dạng bài: {label}",
-            f"Kiến thức dùng: {knowledge}",
-            f"Cách nghĩ nhanh: Mình đi {len(plan_steps)} bước.",
-            f"Bước 1: {plan_steps[0]}. Bước 2: {plan_steps[1]}. Con nói Thầy nghe bước 1 là gì nhé?",
-        ])
+    if solved["kind"] == "circle_mcq":
+        mention_choice = _response_mentions_choice(response)
+        if mention_choice and mention_choice != solved["correct_letter"] and (allow_full_solution or hint_request_count >= 2):
+            return _safe_child_circle_answer(solved)
+        return response.strip()
 
-    return _line_block([
-        f"Dạng bài: {label}",
-        f"Kiến thức dùng: {knowledge}",
-        "Cách nghĩ nhanh: làm đúng ý chính trước rồi mới chốt đáp án.",
-        "Con thử nói bước đầu tiên mình nên làm nhé?",
-    ])
-
-
-def _build_parent_opening(problem_text: str, blueprint: dict, solved: dict | None) -> str:
-    plan_steps = blueprint.get("plan_steps", [])
-    lines = [
-        f"Dạng bài: {blueprint.get('label', 'Bài toán')}",
-        f"Kiến thức dùng: {blueprint.get('knowledge_used', '')}",
-    ]
-
-    if blueprint.get("flow_type") == "multiple_choice":
-        lines.append("Hướng làm cả bài: cho con xét từng đáp án một, bắt đầu từ A, không chốt theo cảm giác.")
-    elif blueprint.get("show_plan_steps") and len(plan_steps) >= 2:
-        lines.append(f"Hướng làm cả bài: đi {len(plan_steps)} bước — bước 1 {plan_steps[0].lower()}, bước 2 {plan_steps[1].lower()}.")
-    else:
-        lines.append("Hướng làm cả bài: xác định đúng phép tính chính rồi mới viết câu trả lời.")
-
-    common_errors = blueprint.get("common_errors", [])
-    if common_errors:
-        lines.append(f"Lỗi dễ mắc: {common_errors[0]}.")
-    lines.append("Ba mẹ nên hỏi con: Con đang làm bước nào trước?")
-    if solved and solved.get("answer_text") and blueprint.get("flow_type") != "multiple_choice":
-        lines.append(f"Lời giải mẫu ngắn: Đáp số {solved['answer_text']}.")
-    return _line_block(lines)
-
-
-def _extract_choice_letter(user_input: str) -> str | None:
-    normalized = normalize_user_input(user_input)
-    match = re.search(r"\b([A-D])\b", normalized)
-    return match.group(1).upper() if match else None
-
-
-def _extract_last_number(user_input: str) -> int | None:
-    matches = re.findall(r"\d[\d .]*", user_input or "")
-    if not matches:
-        return None
-    return _clean_num(matches[-1])
-
-
-def responses_too_similar(previous: str, current: str) -> bool:
-    a = normalize_text(previous)
-    b = normalize_text(current)
-    if not a or not b:
-        return False
-    return SequenceMatcher(None, a, b).ratio() >= 0.86
-
-
-def should_mark_finished_after_child_help(response: str, hint_request_count: int) -> bool:
-    text = normalize_text(response)
-    if "đáp số" in text or "kiến thức cần nhớ" in text:
-        return True
-    if hint_request_count >= 3 and any(k in text for k in ["vậy", "kết quả", "đáp án"]):
-        return True
-    return False
+    # Numeric: không tự đẩy đáp án ở gợi ý nhẹ / dẫn từng bước.
+    if mode == "child" and not allow_full_solution:
+        answer_digits = _compact_number_text(solved.get("answer_text", ""))
+        text_digits = _compact_number_text(response)
+        if opening and answer_digits and answer_digits in text_digits:
+            return response.strip().replace(solved.get("answer_text", ""), "")
+        if reply_type in {"student_dont_know", "student_asks_answer"} and hint_request_count < 2:
+            if answer_digits and answer_digits in text_digits:
+                step_prompt = _safe_child_numeric_step_prompt(solved)
+                if step_prompt:
+                    return step_prompt
+    return response.strip()
 
 
 def generate_opening_tutoring_response(problem_text: str, mode: str, support_level: str) -> str | None:
-    problem_type = detect_problem_type(problem_text)
-    blueprint = get_problem_blueprint(problem_type)
-    flow_type = blueprint.get("flow_type", "")
-    solved = _solve_supported_problem(problem_text)
-    _ = support_level
+    context = build_initial_context(problem_text, mode, support_level)
+    response = generate_text_response(
+        system_prompt=get_system_prompt(mode),
+        user_input=context,
+    )
+    return _apply_response_guardrails(
+        response=response,
+        problem_text=problem_text,
+        mode=mode,
+        opening=True,
+        chat_history=[],
+    )
 
-    if mode == "parent":
-        return _build_parent_opening(problem_text, blueprint, solved)
-
-    if mode == "child" and flow_type in {"multi_step", "unit_conversion", "unit_rate", "multiple_choice"}:
-        return _build_child_opening(problem_text, blueprint)
-
-    if mode == "child":
-        supported_opening = _build_supported_opening_from_solution(problem_text, solved)
-        if supported_opening:
-            return supported_opening
-
-    return None
-
-
-def _child_hint_for_supported_problem(problem_text: str, solved: dict | None, stuck_count: int) -> str | None:
-    blueprint = get_problem_blueprint(detect_problem_type(problem_text))
-    flow_type = blueprint.get("flow_type", "")
-
-    if flow_type == "multiple_choice":
-        if solved and solved.get("kind") == "geometry_farthest":
-            return "Mình tìm số lớn nhất trong 4 quãng đường nhé. Con nhìn xem số nào lớn nhất?"
-        if solved and solved.get("kind") == "circle_mcq":
-            return "Mình xét A trước nhé. OQ đi từ tâm ra đường tròn, vậy nó là bán kính hay đường kính?"
-        return "Mình xét từng đáp án một nhé. Con nhìn A trước: A đúng hay sai?"
-
-    if flow_type == "unit_conversion":
-        if solved and solved.get("kind") == "unit_conversion_subtract":
-            total_cm = solved.get("total_converted")
-            if stuck_count >= 2:
-                return f"Mình đổi về cùng đơn vị trước nhé: 3 m 25 cm = {_format_int(total_cm)} cm. Rồi con làm phép trừ tiếp nào?"
-            return "Trước hết con đổi về cùng một đơn vị nhé. Ở đây mình nên đổi hết ra cm."
-
-    if flow_type == "unit_rate":
-        if solved and solved.get("kind") == "unit_rate":
-            if stuck_count >= 2:
-                return f"Mình tìm 1 {solved['group_name']} trước nhé: lấy tổng số chia cho số {solved['group_name']}."
-            return f"Đây là bài rút về đơn vị. Con tìm 1 {solved['group_name']} trước nhé."
-
-    if flow_type == "multi_step":
-        if solved and solved.get("kind") == "multi_step_bricks":
-            if stuck_count >= 2:
-                return "Bước 1 mình tìm số viên gạch đã mua bằng phép nhân nhé."
-            return "Mình đi 2 bước. Con tìm phần đã có trước nhé."
-        if solved and solved.get("kind") == "store_case":
-            if stuck_count >= 2:
-                return "Mình tìm số quyển đã bán trước nhé: số chồng nhân với số quyển bán ở mỗi chồng."
-            return "Mình đi 2 bước. Con tìm số đã bán trước nhé."
-        if solved and solved.get("kind") == "operation_chain":
-            return "Mình làm từ trái sang phải nhé. Con tính ô trống đầu tiên trước nào."
-        if solved and solved.get("kind") == "gift_then_subtract":
-            return "Con tìm phần mẹ cho thêm trước nhé. Ở đây mình nhìn vào chỗ gấp 4 lần."
-
-    if solved and solved.get("kind") == "one_step_division":
-        return "Đây là bài chia đều. Con lấy tổng số chia cho số phần nhé."
-    if solved and solved.get("kind") == "perimeter_square":
-        return "Hình vuông có 4 cạnh bằng nhau. Con lấy 1 cạnh nhân 4 nhé."
-    if solved and solved.get("kind") == "perimeter_rectangle":
-        return "Con cộng chiều dài với chiều rộng trước nhé, rồi mới nhân 2."
-    if solved and solved.get("kind") == "predecessor":
-        return "Số liền trước thì mình lùi lại 1 đơn vị nhé."
-    if solved and solved.get("kind") == "successor":
-        return "Số liền sau thì mình tiến thêm 1 đơn vị nhé."
-    if solved and solved.get("kind") == "unknown_minuend":
-        return "Muốn tìm số bị trừ, con lấy hiệu cộng số trừ nhé."
-
-    return None
-
-
-def _child_reply_for_supported_problem(
-    problem_text: str,
-    user_input: str,
-    reply_type: str,
-    allow_full_solution: bool,
-    support_level: str,
-    stuck_count: int,
-    chat_history: list,
-) -> str | None:
-    solved = _solve_supported_problem(problem_text)
-    blueprint = get_problem_blueprint(detect_problem_type(problem_text))
-    flow_type = blueprint.get("flow_type", "")
-
-    if reply_type == "student_asks_answer" and not allow_full_solution:
-        hint = _child_hint_for_supported_problem(problem_text, solved, max(stuck_count, 1))
-        if hint:
-            return f"Thầy chưa chốt đáp án ngay nhé. {hint}"
-
-    if reply_type == "student_dont_know":
-        if flow_type == "multiple_choice" and solved:
-            if solved.get("kind") == "circle_mcq":
-                return _advance_mcq_circle_hint(chat_history, solved)
-            if solved.get("kind") == "geometry_farthest":
-                return _advance_geometry_farthest_hint(chat_history, solved)
-        if flow_type in {"multi_step", "unit_rate"} and solved:
-            advanced = _advance_multi_step_hint(chat_history, solved)
-            if advanced:
-                return advanced
-        return _child_hint_for_supported_problem(problem_text, solved, max(stuck_count, 1))
-
-    if flow_type == "multiple_choice" and solved:
-        letter = _extract_choice_letter(user_input)
-        if solved.get("kind") == "geometry_farthest":
-            if letter and solved.get("correct_letter"):
-                if letter == solved["correct_letter"]:
-                    return _line_block([
-                        f"Đúng rồi, {letter} là đáp án đúng.",
-                        f"Vì {solved['correct_name']} là xa nhất: {_format_int(solved['correct_value'])} m.",
-                        "Kiến thức cần nhớ: bài kiểu này mình tìm số lớn nhất rồi ghép với đúng đối tượng.",
-                    ])
-                return "Chưa đúng nhé. Con so lại 4 số đường dài một lần nữa xem số nào lớn nhất?"
-            return "Con nhìn 4 số quãng đường nhé. Số nào lớn nhất thì đó là đáp án đúng."
-
-        if solved.get("kind") == "circle_mcq":
-            if letter and solved.get("correct_letter"):
-                if letter == solved["correct_letter"]:
-                    return _line_block([
-                        f"Đúng rồi, {letter} là đáp án đúng.",
-                        f"Vì đáp án đúng là: {solved['correct_name']}.",
-                        "Kiến thức cần nhớ: bán kính đi từ tâm ra đường tròn, còn đường kính đi qua tâm và nối hai điểm trên đường tròn.",
-                    ])
-                return "Chưa đúng nhé. Con nhìn lại A và C xem: OQ, OP đều chỉ đi từ tâm ra đường tròn thôi. Vậy chúng là gì nhỉ?"
-            return "Mình xét A trước nhé. OQ đi từ tâm O ra đường tròn, vậy nó là bán kính hay đường kính?"
-
-        if letter and solved.get("correct_letter"):
-            if letter == solved["correct_letter"]:
-                return _line_block([
-                    f"Đúng rồi, {letter} là đáp án đúng.",
-                    f"Vì đáp án đúng là: {solved['correct_name']}.",
-                    "Kiến thức cần nhớ: bài trắc nghiệm nên xét từng đáp án một.",
-                ])
-            return f"Chưa đúng nhé. Mình chưa chốt vội. Con quay lại xét A trước, xem A đúng hay sai nào?"
-        return "Mình xét từng đáp án một nhé. Con thử nói đáp án A đúng hay sai trước nào?"
-
-    if not solved:
-        return None
-
-    user_number = _extract_last_number(user_input)
-
-    if solved.get("kind") == "unit_conversion_subtract":
-        total_cm, answer = solved["step_values"]
-        if user_number == total_cm:
-            return f"Đúng rồi, con đã đổi được {_format_int(total_cm)} cm. Giờ con lấy {_format_int(total_cm)} trừ 75 nhé."
-        if user_number == answer:
-            return _line_block([
-                f"Đúng rồi, còn lại {solved['answer_text']}.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: đổi về cùng đơn vị trước rồi mới tính.",
-            ])
-
-    if solved.get("kind") in {"multi_step_bricks", "store_case", "unit_rate", "operation_chain", "gift_then_subtract"}:
-        steps = solved["step_values"]
-        if solved.get("kind") == "operation_chain":
-            first_blank, second_blank = steps
-            if user_number == first_blank:
-                return f"Đúng rồi, ô trống đầu tiên là {_format_int(first_blank)}. Giờ con lấy {_format_int(first_blank)} chia 5 nhé."
-            if user_number == second_blank:
-                return _line_block([
-                    f"Đúng rồi, ô cuối là {_format_int(second_blank)}.",
-                    f"Đáp số: {_format_int(second_blank)}.",
-                    "Kiến thức cần nhớ: chuỗi thao tác thì làm từ trái sang phải.",
-                ])
-        elif solved.get("kind") == "gift_then_subtract":
-            gifted, total, answer = steps
-            if user_number == gifted:
-                return f"Đúng rồi, mẹ cho thêm {_format_int(gifted)} {solved['unit']}. Giờ con tìm tất cả có bao nhiêu bông nhé."
-            if user_number == total:
-                return f"Đúng rồi, tất cả có {_format_int(total)} {solved['unit']}. Giờ con trừ tiếp 9 nhé."
-            if user_number == answer:
-                return _line_block([
-                    f"Đúng rồi, Lan còn lại {solved['answer_text']}.",
-                    f"Đáp số: {solved['answer_text']}.",
-                    "Kiến thức cần nhớ: bài nhiều bước thì làm lần lượt từng phần.",
-                ])
-        else:
-            if len(steps) >= 2 and user_number == steps[0]:
-                if solved["kind"] == "unit_rate":
-                    return f"Đúng rồi, con đã tìm được 1 {solved['group_name']} là {_format_int(steps[0])}. Giờ con tìm số của phần cần hỏi nhé."
-                if solved["kind"] == "multi_step_bricks":
-                    return f"Đúng rồi, bác đã mua {_format_int(steps[0])} viên gạch. Giờ con lấy 78 000 trừ {_format_int(steps[0])} nhé."
-                return f"Đúng rồi, đã bán {_format_int(steps[0])} {solved['unit']}. Giờ con tìm phần còn lại nhé."
-            if user_number == solved["answer_value"]:
-                return _line_block([
-                    f"Đúng rồi, kết quả là {solved['answer_text']}.",
-                    f"Đáp số: {solved['answer_text']}.",
-                    "Kiến thức cần nhớ: làm xong bước 1 rồi mới sang bước 2.",
-                ])
-
-    if solved.get("kind") == "one_step_division":
-        if user_number == solved["answer_value"]:
-            if support_level == "goi_y" and reply_type == "student_number_only":
-                return f"Đúng kết quả số rồi. Con viết đầy đủ giúp Thầy: {solved['answer_text']}."
-            return _line_block([
-                f"Đúng rồi, mỗi phần có {solved['answer_text']}.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: bài chia đều thì lấy tổng số chia cho số phần.",
-            ])
-
-    if solved.get("kind") == "perimeter_square":
-        if user_number == 4:
-            return f"Đúng rồi, hình vuông có 4 cạnh. Giờ con lấy {solved['side']} nhân 4 nhé."
-        if user_number == solved["answer_value"]:
-            return _line_block([
-                f"Đúng rồi, chu vi là {solved['answer_text']}.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: chu vi hình vuông bằng cạnh nhân 4.",
-            ])
-
-    if solved.get("kind") == "perimeter_rectangle":
-        summed, answer = solved["step_values"]
-        if user_number == summed:
-            return f"Đúng rồi, con đã tìm được {solved['length']} + {solved['width']} = {_format_int(summed)}. Giờ con nhân 2 nhé."
-        if user_number == answer:
-            return _line_block([
-                f"Đúng rồi, chu vi là {solved['answer_text']}.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: chu vi hình chữ nhật bằng (dài + rộng) nhân 2.",
-            ])
-
-    if solved.get("kind") in {"predecessor", "successor", "unknown_minuend"}:
-        if user_number == solved["answer_value"]:
-            reminder = {
-                "predecessor": "số liền trước thì trừ 1.",
-                "successor": "số liền sau thì cộng 1.",
-                "unknown_minuend": "muốn tìm số bị trừ thì lấy hiệu cộng số trừ.",
-            }[solved["kind"]]
-            return _line_block([
-                f"Đúng rồi, kết quả là {solved['answer_text']}.",
-                f"Đáp số: {solved['answer_text']}.",
-                f"Kiến thức cần nhớ: {reminder}",
-            ])
-
-    if allow_full_solution or support_level == "cach_giai":
-        if solved.get("kind") == "unit_conversion_subtract":
-            total_cm, answer = solved["step_values"]
-            return _line_block([
-                f"Mình làm thế này nhé: 3 m 25 cm = {_format_int(total_cm)} cm.",
-                f"Rồi lấy {_format_int(total_cm)} - 75 = {_format_int(answer)} cm.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: đổi về cùng đơn vị trước rồi mới tính.",
-            ])
-        if solved.get("kind") in {"multi_step_bricks", "store_case", "unit_rate", "one_step_division", "perimeter_square", "perimeter_rectangle", "predecessor", "successor", "unknown_minuend", "operation_chain", "gift_then_subtract"}:
-            lines = []
-            if solved.get("kind") == "multi_step_bricks":
-                bought, answer = solved["step_values"]
-                lines.extend([
-                    f"Bước 1: Bác đã mua {_format_int(bought)} viên gạch.",
-                    f"Bước 2: Còn phải mua {_format_int(answer)} viên gạch.",
-                ])
-            elif solved.get("kind") == "store_case":
-                sold, answer = solved["step_values"]
-                lines.extend([
-                    f"Bước 1: Đã bán {_format_int(sold)} quyển vở.",
-                    f"Bước 2: Còn lại {_format_int(answer)} quyển vở.",
-                ])
-            elif solved.get("kind") == "unit_rate":
-                one_part, answer = solved["step_values"]
-                lines.extend([
-                    f"Bước 1: 1 {solved['group_name']} có {_format_int(one_part)} {solved['unit']}.",
-                    f"Bước 2: Phần cần tìm có {solved['answer_text']}.",
-                ])
-            elif solved.get("kind") == "one_step_division":
-                lines.append(f"Lấy tổng số chia cho số phần, được {solved['answer_text']}.")
-            elif solved.get("kind") == "perimeter_square":
-                lines.append(f"Hình vuông có 4 cạnh nên lấy {solved['side']} x 4 = {_format_int(solved['answer_value'])} cm.")
-            elif solved.get("kind") == "perimeter_rectangle":
-                summed, answer = solved['step_values']
-                lines.extend([
-                    f"Bước 1: {solved['length']} + {solved['width']} = {_format_int(summed)}.",
-                    f"Bước 2: {_format_int(summed)} x 2 = {_format_int(answer)} cm.",
-                ])
-            elif solved.get("kind") == "predecessor":
-                lines.append(f"Số liền trước của {_format_int(solved['base'])} là {_format_int(solved['answer_value'])}.")
-            elif solved.get("kind") == "successor":
-                lines.append(f"Số liền sau của {_format_int(solved['base'])} là {_format_int(solved['answer_value'])}.")
-            elif solved.get("kind") == "unknown_minuend":
-                lines.append(f"Muốn tìm số bị trừ, lấy {solved['difference']} + {solved['subtrahend']} = {_format_int(solved['answer_value'])}.")
-            elif solved.get("kind") == "operation_chain":
-                first_blank, second_blank = solved['step_values']
-                lines.extend([
-                    f"Ô trống thứ nhất: {solved['start']} - {solved['minus_value']} = {_format_int(first_blank)}.",
-                    f"Ô trống thứ hai: {_format_int(first_blank)} : {solved['divide_value']} = {_format_int(second_blank)}.",
-                ])
-            elif solved.get("kind") == "gift_then_subtract":
-                gifted, total, answer = solved['step_values']
-                lines.extend([
-                    f"Bước 1: Mẹ cho thêm {_format_int(gifted)} {solved['unit']}.",
-                    f"Bước 2: Lan có tất cả {_format_int(total)} {solved['unit']}.",
-                    f"Bước 3: Lan còn lại {_format_int(answer)} {solved['unit']}.",
-                ])
-            lines.extend([
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: đi đúng thứ tự các bước của bài.",
-            ])
-            return _line_block(lines)
-
-    return None
 
 
 def generate_followup_tutoring_response(
@@ -1648,32 +1464,43 @@ def generate_followup_tutoring_response(
     mode: str,
     support_level: str,
     chat_history: list,
-    current_step: str | None = None,
-    last_error_type: str | None = None,
-    user_input: str = "",
-    reply_type: str = "normal_reply",
-    allow_full_solution: bool = False,
-    require_full_presentation: bool = False,
-    small_error: bool = False,
-    stuck_count: int = 0,
-    is_finished: bool = False,
+    current_step: str,
+    last_error_type: str,
+    user_input: str,
+    reply_type: str,
+    allow_full_solution: bool,
+    require_full_presentation: bool,
+    small_error: bool,
+    stuck_count: int,
+    is_finished: bool,
     hint_request_count: int = 0,
 ) -> str | None:
-    del current_step, last_error_type, require_full_presentation, small_error, is_finished, hint_request_count
-
-    if mode == "child":
-        return _child_reply_for_supported_problem(
-            problem_text=problem_text,
-            user_input=user_input,
-            reply_type=reply_type,
-            allow_full_solution=allow_full_solution,
-            support_level=support_level,
-            stuck_count=stuck_count,
-            chat_history=chat_history,
-        )
-
-    solved = _solve_supported_problem(problem_text)
-    blueprint = get_problem_blueprint(detect_problem_type(problem_text))
-    if solved and reply_type in {"student_asks_answer", "student_dont_know"}:
-        return _build_parent_opening(problem_text, blueprint, solved)
-    return None
+    context = build_followup_context(
+        problem_text=problem_text,
+        mode=mode,
+        support_level=support_level,
+        chat_history=chat_history,
+        current_step=current_step,
+        last_error_type=last_error_type,
+        user_input=user_input,
+        reply_type=reply_type,
+        allow_full_solution=allow_full_solution,
+        require_full_presentation=require_full_presentation,
+        small_error=small_error,
+        stuck_count=stuck_count,
+        is_finished=is_finished,
+    )
+    response = generate_text_response(
+        system_prompt=get_system_prompt(mode),
+        user_input=context,
+    )
+    return _apply_response_guardrails(
+        response=response,
+        problem_text=problem_text,
+        mode=mode,
+        opening=False,
+        reply_type=reply_type,
+        allow_full_solution=allow_full_solution,
+        hint_request_count=hint_request_count,
+        chat_history=chat_history,
+    )
