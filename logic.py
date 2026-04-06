@@ -1,3 +1,6 @@
+import re
+from difflib import SequenceMatcher
+
 # logic.py
 
 from prompts import (
@@ -572,3 +575,69 @@ Lịch sử buổi học:
 {history_text}
 """
     return context.strip()
+
+# =========================================================
+# COMPAT HELPERS FOR app.py (v8.4 import compatibility)
+# =========================================================
+def normalize_user_input(user_input: str) -> str:
+    text = (user_input or '').strip()
+    lowered = normalize_text(text)
+    compact = lowered.replace(' ', '')
+
+    choice_patterns = [
+        r'^([abcd])$',
+        r'^đápán([abcd])$',
+        r'^dapan([abcd])$',
+        r'^chon([abcd])$',
+        r'^chọn([abcd])$',
+    ]
+    for pattern in choice_patterns:
+        match = re.match(pattern, compact, flags=re.IGNORECASE)
+        if match:
+            return f"Chọn đáp án {match.group(1).upper()}"
+
+    return text
+
+
+def responses_too_similar(previous: str, current: str) -> bool:
+    a = normalize_text(previous or '')
+    b = normalize_text(current or '')
+    if not a or not b:
+        return False
+    return SequenceMatcher(None, a, b).ratio() >= 0.86
+
+
+def should_mark_finished_after_child_help(response: str, hint_request_count: int) -> bool:
+    text = normalize_text(response or '')
+    if detect_finished_response(response or ''):
+        return True
+    if 'đáp số' in text or 'kiến thức cần nhớ' in text:
+        return True
+    if hint_request_count >= 3 and any(k in text for k in ['vậy', 'kết quả', 'đáp án']):
+        return True
+    return False
+
+
+def generate_opening_tutoring_response(problem_text: str, mode: str, support_level: str):
+    # Trả None để app.py fallback về flow Gemini/prompt của bản 8.4 gốc.
+    return None
+
+
+def generate_followup_tutoring_response(
+    problem_text: str,
+    mode: str,
+    support_level: str,
+    chat_history: list,
+    current_step: str | None = None,
+    last_error_type: str | None = None,
+    user_input: str = '',
+    reply_type: str = 'normal_reply',
+    allow_full_solution: bool = False,
+    require_full_presentation: bool = False,
+    small_error: bool = False,
+    stuck_count: int = 0,
+    is_finished: bool = False,
+    hint_request_count: int = 0,
+):
+    # Trả None để app.py dùng build_followup_context + Gemini như bản 8.4 gốc.
+    return None
