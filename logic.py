@@ -172,7 +172,7 @@ def detect_problem_type(problem_text: str) -> str:
 
     if any(k in text for k in ["gấp", "mỗi lần", "sau đó", "rồi", "còn lại", "còn phải", "còn thiếu"]):
         return "multi_step_find_missing"
-    if any(k in text for k in ["m ", " cm", " kg", " g", "xăng-ti-mét", "ki-lô-gam", "đổi"]):
+    if any(k in text for k in [" m ", " cm", " kg", " g", "xăng-ti-mét", "ki-lô-gam", "đổi"]):
         return "unit_conversion_then_calculate"
     return "multi_step_find_missing"
 
@@ -228,9 +228,8 @@ def detect_problem_complexity(problem_text: str) -> str:
     return "medium_or_hard" if count >= 2 else "easy"
 
 
-# =========================================================
-# PROMPT CONTEXT HELPERS
-# =========================================================
+# ... trimmed? no, continue below
+
 def build_plan_block(problem_blueprint: dict) -> str:
     if not problem_blueprint or not problem_blueprint.get("show_plan_steps"):
         return ""
@@ -327,9 +326,6 @@ Yêu cầu mở đầu cực quan trọng:
     return context.strip()
 
 
-# =========================================================
-# USER REPLY CLASSIFICATION / UI RULES
-# =========================================================
 def _is_choice_only(text: str) -> bool:
     compact = normalize_text(text).replace(" ", "")
     return bool(
@@ -411,6 +407,7 @@ def is_small_error(user_input: str) -> bool:
 
 def should_require_full_presentation(st, user_input: str) -> bool:
     text = normalize_text(user_input)
+
     has_equal = "=" in text
     has_unit = any(
         unit in text
@@ -433,10 +430,13 @@ def should_require_full_presentation(st, user_input: str) -> bool:
             "bút",
         ]
     )
+
     if has_equal or has_unit:
         return False
+
     if _get_state_value(st.session_state, "presentation_retry_count", 0) >= 1:
         return False
+
     return True
 
 
@@ -477,9 +477,6 @@ def detect_finished_response(response_text: str) -> bool:
     return any(s in text for s in finish_signals)
 
 
-# =========================================================
-# CONTEXT BUILDERS
-# =========================================================
 def build_followup_context(
     problem_text: str,
     mode: str,
@@ -626,9 +623,6 @@ Lịch sử buổi học:
 """.strip()
 
 
-# =========================================================
-# PARSERS / SOLVERS FOR DETERMINISTIC TEACHING
-# =========================================================
 def _clean_num(text: str) -> int:
     return int(re.sub(r"\D", "", text))
 
@@ -650,16 +644,13 @@ def _extract_named_distances(problem_text: str) -> list[dict]:
             continue
         if ":" not in raw:
             continue
-        if not any(unit in raw.lower() for unit in [" m", "m ", "m(", "m"]):
-            if " m" not in raw.lower() and raw.lower().endswith("m") is False:
-                continue
-        name_part, value_part = raw.split(":", 1)
-        digits = re.findall(r"\d[\d .]*", value_part)
+        digits = re.findall(r"\d[\d .]*", raw)
         if not digits:
             continue
         value = _clean_num(digits[-1])
         if value < 10:
             continue
+        name_part, _ = raw.split(":", 1)
         name = re.sub(r"^đường đến\s*", "", name_part, flags=re.IGNORECASE).strip()
         key = (name.lower(), value)
         if key in seen:
@@ -671,10 +662,9 @@ def _extract_named_distances(problem_text: str) -> list[dict]:
 
 def _extract_options(problem_text: str) -> list[dict]:
     options = []
-    for line in problem_text.splitlines():
-        match = re.match(r"^\s*([A-D])\s*[.:]\s*(.+?)\s*$", line.strip(), flags=re.IGNORECASE)
-        if match:
-            options.append({"letter": match.group(1).upper(), "text": match.group(2).strip()})
+    flat = problem_text.replace("\n", " ")
+    for match in re.finditer(r"([A-D])\.\s*(.*?)(?=\s+[A-D]\.\s*|$)", flat, flags=re.IGNORECASE):
+        options.append({"letter": match.group(1).upper(), "text": match.group(2).strip()})
     return options
 
 
@@ -863,9 +853,6 @@ def _solve_supported_problem(problem_text: str) -> dict | None:
     return None
 
 
-# =========================================================
-# MICRO GOALS / STEP TRACKING
-# =========================================================
 def _build_micro_goals(problem_text: str) -> list[str]:
     blueprint = get_problem_blueprint(detect_problem_type(problem_text))
     flow_type = blueprint.get("flow_type")
@@ -918,9 +905,6 @@ def _infer_active_micro_goal(problem_text: str, chat_history: list) -> dict:
     return {"index": index, "goal": goals[index], "goals": goals}
 
 
-# =========================================================
-# RESPONSE TEXT HELPERS
-# =========================================================
 def _line_block(lines: list[str]) -> str:
     return "\n".join([line for line in lines if line]).strip()
 
@@ -1008,14 +992,12 @@ def should_mark_finished_after_child_help(response: str, hint_request_count: int
     return False
 
 
-# =========================================================
-# DETERMINISTIC OPENING / FOLLOWUP
-# =========================================================
 def generate_opening_tutoring_response(problem_text: str, mode: str, support_level: str) -> str | None:
     problem_type = detect_problem_type(problem_text)
     blueprint = get_problem_blueprint(problem_type)
     flow_type = blueprint.get("flow_type", "")
     solved = _solve_supported_problem(problem_text)
+    _ = support_level
 
     if mode == "parent":
         return _build_parent_opening(problem_text, blueprint, solved)
