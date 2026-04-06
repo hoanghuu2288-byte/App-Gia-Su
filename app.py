@@ -560,6 +560,52 @@ def get_recent_assistant_responses(limit: int = 3):
             break
     return responses
 
+def trim_finished_child_response(response: str) -> str:
+    text = (response or "").strip()
+    if not text:
+        return text
+
+    lowered = text.lower()
+    finish_signals = [
+        "đáp số",
+        "đáp án cuối cùng",
+        "kiến thức cần nhớ",
+        "đã giải xong",
+        "hoàn thành bài này",
+    ]
+    has_finish_signal = any(signal in lowered for signal in finish_signals)
+    if not has_finish_signal:
+        return text
+
+    cut_markers = [
+        "Bây giờ, thầy trò mình cùng xem một bài toán mới",
+        "Được rồi con. Thầy trò mình cùng xem bài toán mới này nhé.",
+        "Đề bài:",
+    ]
+    cut_positions = [text.find(marker) for marker in cut_markers if text.find(marker) != -1]
+
+    all_dang_bai = [m.start() for m in re.finditer(r"Dạng bài:", text)]
+    if len(all_dang_bai) >= 2:
+        cut_positions.append(all_dang_bai[1])
+
+    if cut_positions:
+        text = text[:min(cut_positions)].rstrip()
+
+    return text.strip()
+
+
+def refresh_child_help_visibility() -> None:
+    should_show = (
+        st.session_state.mode == "child"
+        and st.session_state.problem_confirmed
+        and len(st.session_state.chat_history) > 0
+        and not st.session_state.is_finished
+    )
+    st.session_state.show_help_buttons = should_show
+    if not should_show:
+        st.session_state.show_hint_button = False
+        st.session_state.show_solution_button = False
+
 
 def build_child_hint_request_message(hint_count: int) -> str:
     if hint_count <= 1:
@@ -692,9 +738,11 @@ def start_problem_session():
             user_input=initial_context,
         )
 
+    response = trim_finished_child_response(response)
     st.session_state.is_finished = detect_finished_response(response)
     append_chat_message("assistant", response)
     st.session_state.last_assistant_response = response
+    refresh_child_help_visibility()
 
 
 def run_followup_turn(
@@ -787,6 +835,7 @@ def run_followup_turn(
             allow_full_solution_for_response=allow_full_solution_for_response,
         )
 
+    response = trim_finished_child_response(response)
     st.session_state.is_finished = (
         forced_finished
         or should_mark_finished_after_child_help(
@@ -795,13 +844,10 @@ def run_followup_turn(
         )
         or detect_finished_response(response)
     )
-    if st.session_state.is_finished:
-        st.session_state.show_help_buttons = False
-        st.session_state.show_hint_button = False
-        st.session_state.show_solution_button = False
 
     append_chat_message("assistant", response)
     st.session_state.last_assistant_response = response
+    refresh_child_help_visibility()
 
 
 def get_child_help_response_settings():
@@ -817,16 +863,6 @@ def get_child_help_response_settings():
         return "tung_buoc", False
 
     return "goi_y", False
-
-
-def should_show_child_help_button() -> bool:
-    if st.session_state.mode != "child":
-        return False
-    if not st.session_state.problem_confirmed:
-        return False
-    if len(st.session_state.chat_history) == 0:
-        return False
-    return not detect_finished_response(st.session_state.last_assistant_response)
 
 
 # =========================================================
@@ -1067,11 +1103,20 @@ else:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        if should_show_child_help_button():
+        refresh_child_help_visibility()
+        if st.session_state.show_help_buttons:
             st.markdown("**Hỗ trợ thêm:**")
             st.caption('Con bí thì bấm **Gợi ý thêm**, không cần gõ "không biết".')
 
             if st.button("Gợi ý thêm", key="child_help_button"):
+                if should_mark_finished_after_child_help(
+                    st.session_state.last_assistant_response,
+                    st.session_state.hint_request_count,
+                ):
+                    st.session_state.is_finished = True
+                    refresh_child_help_visibility()
+                    st.rerun()
+
                 st.session_state.hint_request_count += 1
                 support_level_for_response, allow_full_solution_for_response = get_child_help_response_settings()
 
