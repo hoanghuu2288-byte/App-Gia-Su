@@ -819,6 +819,16 @@ def get_child_help_response_settings():
     return "goi_y", False
 
 
+def should_show_child_help_button() -> bool:
+    if st.session_state.mode != "child":
+        return False
+    if not st.session_state.problem_confirmed:
+        return False
+    if len(st.session_state.chat_history) == 0:
+        return False
+    return not detect_finished_response(st.session_state.last_assistant_response)
+
+
 # =========================================================
 # APP UI
 # =========================================================
@@ -1057,25 +1067,11 @@ else:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        if (
-            st.session_state.mode == "child"
-            and not st.session_state.is_finished
-            and len(st.session_state.chat_history) > 0
-        ):
+        if should_show_child_help_button():
             st.markdown("**Hỗ trợ thêm:**")
             st.caption('Con bí thì bấm **Gợi ý thêm**, không cần gõ "không biết".')
 
             if st.button("Gợi ý thêm", key="child_help_button"):
-                if should_mark_finished_after_child_help(
-                    st.session_state.last_assistant_response,
-                    st.session_state.hint_request_count,
-                ):
-                    st.session_state.is_finished = True
-                    st.session_state.show_help_buttons = False
-                    st.session_state.show_hint_button = False
-                    st.session_state.show_solution_button = False
-                    st.rerun()
-
                 st.session_state.hint_request_count += 1
                 support_level_for_response, allow_full_solution_for_response = get_child_help_response_settings()
 
