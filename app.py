@@ -559,6 +559,7 @@ def reset_learning_flow():
     st.session_state.hint_request_count = 0
     st.session_state.last_real_user_reply = ""
     st.session_state.last_assistant_response = ""
+    st.session_state.tutoring_state = {}
 
 
 def append_chat_message(role: str, content: str, *, hidden: bool = False):
@@ -579,6 +580,13 @@ def get_recent_assistant_responses(limit: int = 3):
         if len(responses) >= limit:
             break
     return responses
+
+
+def has_real_user_message() -> bool:
+    return any(
+        message.get("role") == "user" and not message.get("hidden")
+        for message in st.session_state.chat_history
+    )
 
 
 def build_child_hint_request_message(hint_count: int) -> str:
@@ -1085,6 +1093,7 @@ else:
             st.session_state.mode == "child"
             and not st.session_state.is_finished
             and len(st.session_state.chat_history) > 0
+            and has_real_user_message()
         ):
             st.markdown("**Hỗ trợ thêm:**")
             st.caption('Con bí thì bấm **Gợi ý thêm**, không cần gõ "không biết".')
