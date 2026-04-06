@@ -116,27 +116,47 @@ def normalize_user_input(user_input: str) -> str:
 
 
 def looks_like_new_problem(user_input: str) -> bool:
-    text = normalize_text(user_input)
-    signals = [
+    raw = (user_input or "").strip()
+    text = normalize_text(raw)
+
+    if len(text) < 18:
+        return False
+
+    if any(text.startswith(prefix) for prefix in ["con nghĩ", "theo con", "em nghĩ", "vì", "chắc là", "hình như"]):
+        return False
+
+    question_signals = [
         "hỏi",
-        "một",
-        "một cửa hàng",
-        "một cuộn",
-        "một thùng",
-        "một thư viện",
-        "một hình",
         "tính",
-        "tìm x",
         "tìm",
         "bao nhiêu",
         "còn lại",
+        "còn phải",
         "chia đều",
+        "chu vi",
+        "số liền trước",
+        "số liền sau",
+        "khẳng định đúng",
+        "đáp án đúng",
+        "ô trống",
+    ]
+    structure_signals = [
+        "mỗi lần",
+        "mỗi khay",
+        "mỗi hộp",
         "chiều dài",
         "chiều rộng",
-        "chọn đáp án đúng",
-        "khẳng định đúng",
+        "hình vuông",
+        "hình chữ nhật",
+        "hình tròn",
+        "->",
     ]
-    return len(text) >= 20 and any(s in text for s in signals)
+    numeric_count = len(re.findall(r"\d[\d .]*", raw))
+
+    has_math_question = any(signal in text for signal in question_signals)
+    has_structure = any(signal in text for signal in structure_signals) or numeric_count >= 2
+
+    return has_math_question and has_structure
 
 
 def _matches_keywords(text: str, keywords: list[str]) -> int:
@@ -150,6 +170,23 @@ def _matches_keywords(text: str, keywords: list[str]) -> int:
 
 def detect_problem_type(problem_text: str) -> str:
     text = normalize_text(problem_text)
+
+    if "số liền trước" in text:
+        return "number_predecessor"
+    if "số liền sau" in text:
+        return "number_successor"
+    if "chu vi hình vuông" in text or ("hình vuông" in text and "cạnh" in text and "đoạn dây" in text):
+        return "perimeter_square"
+    if "chu vi hình chữ nhật" in text or ("hình chữ nhật" in text and "chiều dài" in text and "chiều rộng" in text):
+        return "perimeter_rectangle"
+    if "bị trừ đi" in text and "tìm số" in text:
+        return "find_unknown_minuend"
+    if "->" in text and "ô trống" in text:
+        return "operation_chain"
+    if "gấp" in text and any(k in text for k in ["tặng", "cho đi", "bớt đi", "còn lại"]):
+        return "multi_step_give_away"
+    if "chia đều" in text and any(k in text for k in ["mỗi khay", "mỗi hộp", "mỗi phần", "mỗi chồng"]):
+        return "one_step_division_word"
 
     if any(k in text for k in ["chọn khẳng định đúng", "chọn đáp án đúng", "câu nào đúng", "phương án đúng"]):
         if any(k in text for k in ["tâm hình tròn", "bán kính", "đường kính", "hình tròn", "oq", "op", "mn"]):
@@ -837,6 +874,150 @@ def _parse_one_step_division(problem_text: str) -> dict | None:
     }
 
 
+
+
+def _parse_perimeter_square(problem_text: str) -> dict | None:
+    text = normalize_text(problem_text)
+    if "hình vuông" not in text:
+        return None
+    match = re.search(r"cạnh\s*(\d+)\s*cm", text)
+    if not match:
+        return None
+    side = int(match.group(1))
+    answer = side * 4
+    return {
+        "kind": "perimeter_square",
+        "step_values": [4, answer],
+        "answer_value": answer,
+        "answer_text": f"{_format_int(answer)} cm",
+        "side": side,
+        "unit": "cm",
+    }
+
+
+def _parse_perimeter_rectangle(problem_text: str) -> dict | None:
+    text = normalize_text(problem_text)
+    if "hình chữ nhật" not in text or "chiều dài" not in text or "chiều rộng" not in text:
+        return None
+    match = re.search(r"chiều dài\s*(\d+)\s*cm.*?chiều rộng\s*(\d+)\s*cm", text)
+    if not match:
+        return None
+    length = int(match.group(1))
+    width = int(match.group(2))
+    summed = length + width
+    answer = summed * 2
+    return {
+        "kind": "perimeter_rectangle",
+        "step_values": [summed, answer],
+        "answer_value": answer,
+        "answer_text": f"{_format_int(answer)} cm",
+        "length": length,
+        "width": width,
+        "unit": "cm",
+    }
+
+
+def _parse_predecessor(problem_text: str) -> dict | None:
+    text = normalize_text(problem_text)
+    if "số liền trước" not in text:
+        return None
+    nums = _extract_all_numbers(problem_text)
+    if not nums:
+        return None
+    base = nums[-1]
+    answer = base - 1
+    return {
+        "kind": "predecessor",
+        "answer_value": answer,
+        "answer_text": _format_int(answer),
+        "base": base,
+    }
+
+
+def _parse_successor(problem_text: str) -> dict | None:
+    text = normalize_text(problem_text)
+    if "số liền sau" not in text:
+        return None
+    if "số lớn nhất có 4 chữ số" in text:
+        base = 9999
+    else:
+        nums = _extract_all_numbers(problem_text)
+        if not nums:
+            return None
+        base = nums[-1]
+    answer = base + 1
+    return {
+        "kind": "successor",
+        "answer_value": answer,
+        "answer_text": _format_int(answer),
+        "base": base,
+    }
+
+
+def _parse_unknown_minuend(problem_text: str) -> dict | None:
+    text = normalize_text(problem_text)
+    match = re.search(r"bị trừ đi\s*(\d+)\s*thì được\s*(\d+)", text)
+    if not match:
+        return None
+    subtrahend = int(match.group(1))
+    difference = int(match.group(2))
+    answer = subtrahend + difference
+    return {
+        "kind": "unknown_minuend",
+        "step_values": [answer],
+        "answer_value": answer,
+        "answer_text": _format_int(answer),
+        "subtrahend": subtrahend,
+        "difference": difference,
+    }
+
+
+def _parse_operation_chain(problem_text: str) -> dict | None:
+    text = normalize_text(problem_text)
+    if "->" not in problem_text or "ô trống" not in text:
+        return None
+    nums = _extract_all_numbers(problem_text)
+    if len(nums) < 3:
+        return None
+    start, minus_value, divide_value = nums[:3]
+    first_blank = start - minus_value
+    if divide_value == 0:
+        return None
+    second_blank = first_blank // divide_value
+    return {
+        "kind": "operation_chain",
+        "step_values": [first_blank, second_blank],
+        "answer_value": second_blank,
+        "answer_text": _format_int(second_blank),
+        "start": start,
+        "minus_value": minus_value,
+        "divide_value": divide_value,
+    }
+
+
+def _parse_gift_then_subtract(problem_text: str) -> dict | None:
+    text = normalize_text(problem_text)
+    if "gấp" not in text or "còn lại" not in text:
+        return None
+    nums = _extract_all_numbers(problem_text)
+    if len(nums) < 3:
+        return None
+    start, multiplier, subtract_value = nums[:3]
+    gifted = start * multiplier
+    total = start + gifted
+    answer = total - subtract_value
+    unit = "bông hoa" if "bông hoa" in text else "đơn vị"
+    return {
+        "kind": "gift_then_subtract",
+        "step_values": [gifted, total, answer],
+        "answer_value": answer,
+        "answer_text": f"{_format_int(answer)} {unit}",
+        "gifted": gifted,
+        "total": total,
+        "unit": unit,
+        "multiplier": multiplier,
+    }
+
 def _solve_supported_problem(problem_text: str) -> dict | None:
     for solver in [
         _solve_geometry_farthest,
@@ -846,6 +1027,13 @@ def _solve_supported_problem(problem_text: str) -> dict | None:
         _parse_unit_rate_case,
         _parse_multi_step_bricks,
         _parse_one_step_division,
+        _parse_perimeter_square,
+        _parse_perimeter_rectangle,
+        _parse_predecessor,
+        _parse_successor,
+        _parse_unknown_minuend,
+        _parse_operation_chain,
+        _parse_gift_then_subtract,
     ]:
         solved = solver(problem_text)
         if solved is not None:
@@ -907,6 +1095,72 @@ def _infer_active_micro_goal(problem_text: str, chat_history: list) -> dict:
 
 def _line_block(lines: list[str]) -> str:
     return "\n".join([line for line in lines if line]).strip()
+
+
+
+
+def _build_supported_opening_from_solution(problem_text: str, solved: dict | None) -> str | None:
+    if not solved:
+        return None
+
+    kind = solved.get("kind")
+    if kind == "geometry_farthest":
+        return _line_block([
+            "Dạng bài: So sánh quãng đường để chọn đáp án đúng.",
+            "Kiến thức dùng: tìm số lớn nhất rồi ghép với đúng vườn hoa.",
+            "Cách nghĩ nhanh: nhìn 4 số đường dài và chọn số lớn nhất.",
+            "Con nhìn 4 số này nhé: số nào lớn nhất?",
+        ])
+    if kind == "perimeter_square":
+        return _line_block([
+            "Dạng bài: Chu vi hình vuông.",
+            "Kiến thức dùng: lấy số đo 1 cạnh nhân 4.",
+            "Cách nghĩ nhanh: hình vuông có 4 cạnh bằng nhau.",
+            "Con cho Thầy biết hình vuông có mấy cạnh nào?",
+        ])
+    if kind == "perimeter_rectangle":
+        return _line_block([
+            "Dạng bài: Chu vi hình chữ nhật.",
+            "Kiến thức dùng: cộng chiều dài với chiều rộng rồi nhân 2.",
+            "Cách nghĩ nhanh: mình tìm tổng dài và rộng trước.",
+            "Con thử cộng 12 với 7 trước nhé?",
+        ])
+    if kind == "predecessor":
+        return _line_block([
+            "Dạng bài: Số liền trước.",
+            "Kiến thức dùng: lấy số đã cho trừ 1.",
+            "Cách nghĩ nhanh: lùi lại 1 đơn vị.",
+            "Con thử lấy số đó bớt 1 xem nào?",
+        ])
+    if kind == "successor":
+        return _line_block([
+            "Dạng bài: Số liền sau.",
+            "Kiến thức dùng: lấy số đã cho cộng 1.",
+            "Cách nghĩ nhanh: tiến thêm 1 đơn vị.",
+            "Con thử nghĩ xem sau 9 999 là số nào?",
+        ])
+    if kind == "unknown_minuend":
+        return _line_block([
+            "Dạng bài: Tìm số bị trừ.",
+            "Kiến thức dùng: muốn tìm số bị trừ thì lấy hiệu cộng số trừ.",
+            "Cách nghĩ nhanh: nhìn hai số đã biết rồi cộng lại.",
+            "Con thử lấy 348 cộng 125 nhé?",
+        ])
+    if kind == "operation_chain":
+        return _line_block([
+            "Dạng bài: Chuỗi thao tác.",
+            "Kiến thức dùng: làm lần lượt từ trái sang phải.",
+            "Cách nghĩ nhanh: tính ô trước rồi mới sang ô sau.",
+            "Con thử tính ô trống đầu tiên trước nhé?",
+        ])
+    if kind == "gift_then_subtract":
+        return _line_block([
+            "Dạng bài: Toán nhiều bước.",
+            "Kiến thức dùng: tìm phần được cho thêm rồi tính phần còn lại.",
+            "Cách nghĩ nhanh: nhìn phần gấp lên trước rồi mới trừ tiếp.",
+            "Con thử tìm xem mẹ cho thêm bao nhiêu bông trước nhé?",
+        ])
+    return None
 
 
 def _build_child_opening(problem_text: str, blueprint: dict) -> str:
@@ -1005,6 +1259,11 @@ def generate_opening_tutoring_response(problem_text: str, mode: str, support_lev
     if mode == "child" and flow_type in {"multi_step", "unit_conversion", "unit_rate", "multiple_choice"}:
         return _build_child_opening(problem_text, blueprint)
 
+    if mode == "child":
+        supported_opening = _build_supported_opening_from_solution(problem_text, solved)
+        if supported_opening:
+            return supported_opening
+
     return None
 
 
@@ -1013,6 +1272,10 @@ def _child_hint_for_supported_problem(problem_text: str, solved: dict | None, st
     flow_type = blueprint.get("flow_type", "")
 
     if flow_type == "multiple_choice":
+        if solved and solved.get("kind") == "geometry_farthest":
+            return "Mình tìm số lớn nhất trong 4 quãng đường nhé. Con nhìn xem số nào lớn nhất?"
+        if solved and solved.get("kind") == "circle_mcq":
+            return "Mình xét A trước nhé. OQ đi từ tâm ra đường tròn, vậy nó là bán kính hay đường kính?"
         return "Mình xét từng đáp án một nhé. Con nhìn A trước: A đúng hay sai?"
 
     if flow_type == "unit_conversion":
@@ -1037,9 +1300,23 @@ def _child_hint_for_supported_problem(problem_text: str, solved: dict | None, st
             if stuck_count >= 2:
                 return "Mình tìm số quyển đã bán trước nhé: số chồng nhân với số quyển bán ở mỗi chồng."
             return "Mình đi 2 bước. Con tìm số đã bán trước nhé."
+        if solved and solved.get("kind") == "operation_chain":
+            return "Mình làm từ trái sang phải nhé. Con tính ô trống đầu tiên trước nào."
+        if solved and solved.get("kind") == "gift_then_subtract":
+            return "Con tìm phần mẹ cho thêm trước nhé. Ở đây mình nhìn vào chỗ gấp 4 lần."
 
     if solved and solved.get("kind") == "one_step_division":
         return "Đây là bài chia đều. Con lấy tổng số chia cho số phần nhé."
+    if solved and solved.get("kind") == "perimeter_square":
+        return "Hình vuông có 4 cạnh bằng nhau. Con lấy 1 cạnh nhân 4 nhé."
+    if solved and solved.get("kind") == "perimeter_rectangle":
+        return "Con cộng chiều dài với chiều rộng trước nhé, rồi mới nhân 2."
+    if solved and solved.get("kind") == "predecessor":
+        return "Số liền trước thì mình lùi lại 1 đơn vị nhé."
+    if solved and solved.get("kind") == "successor":
+        return "Số liền sau thì mình tiến thêm 1 đơn vị nhé."
+    if solved and solved.get("kind") == "unknown_minuend":
+        return "Muốn tìm số bị trừ, con lấy hiệu cộng số trừ nhé."
 
     return None
 
@@ -1066,6 +1343,28 @@ def _child_reply_for_supported_problem(
 
     if flow_type == "multiple_choice" and solved:
         letter = _extract_choice_letter(user_input)
+        if solved.get("kind") == "geometry_farthest":
+            if letter and solved.get("correct_letter"):
+                if letter == solved["correct_letter"]:
+                    return _line_block([
+                        f"Đúng rồi, {letter} là đáp án đúng.",
+                        f"Vì {solved['correct_name']} là xa nhất: {_format_int(solved['correct_value'])} m.",
+                        "Kiến thức cần nhớ: bài kiểu này mình tìm số lớn nhất rồi ghép với đúng đối tượng.",
+                    ])
+                return "Chưa đúng nhé. Con so lại 4 số đường dài một lần nữa xem số nào lớn nhất?"
+            return "Con nhìn 4 số quãng đường nhé. Số nào lớn nhất thì đó là đáp án đúng."
+
+        if solved.get("kind") == "circle_mcq":
+            if letter and solved.get("correct_letter"):
+                if letter == solved["correct_letter"]:
+                    return _line_block([
+                        f"Đúng rồi, {letter} là đáp án đúng.",
+                        f"Vì đáp án đúng là: {solved['correct_name']}.",
+                        "Kiến thức cần nhớ: bán kính đi từ tâm ra đường tròn, còn đường kính đi qua tâm và nối hai điểm trên đường tròn.",
+                    ])
+                return "Chưa đúng nhé. Con nhìn lại A và C xem: OQ, OP đều chỉ đi từ tâm ra đường tròn thôi. Vậy chúng là gì nhỉ?"
+            return "Mình xét A trước nhé. OQ đi từ tâm O ra đường tròn, vậy nó là bán kính hay đường kính?"
+
         if letter and solved.get("correct_letter"):
             if letter == solved["correct_letter"]:
                 return _line_block([
@@ -1092,20 +1391,43 @@ def _child_reply_for_supported_problem(
                 "Kiến thức cần nhớ: đổi về cùng đơn vị trước rồi mới tính.",
             ])
 
-    if solved.get("kind") in {"multi_step_bricks", "store_case", "unit_rate"}:
+    if solved.get("kind") in {"multi_step_bricks", "store_case", "unit_rate", "operation_chain", "gift_then_subtract"}:
         steps = solved["step_values"]
-        if len(steps) >= 2 and user_number == steps[0]:
-            if solved["kind"] == "unit_rate":
-                return f"Đúng rồi, con đã tìm được 1 {solved['group_name']} là {_format_int(steps[0])}. Giờ con tìm số của phần cần hỏi nhé."
-            if solved["kind"] == "multi_step_bricks":
-                return f"Đúng rồi, bác đã mua {_format_int(steps[0])} viên gạch. Giờ con lấy 78 000 trừ {_format_int(steps[0])} nhé."
-            return f"Đúng rồi, đã bán {_format_int(steps[0])} {solved['unit']}. Giờ con tìm phần còn lại nhé."
-        if user_number == solved["answer_value"]:
-            return _line_block([
-                f"Đúng rồi, kết quả là {solved['answer_text']}.",
-                f"Đáp số: {solved['answer_text']}.",
-                "Kiến thức cần nhớ: làm xong bước 1 rồi mới sang bước 2.",
-            ])
+        if solved.get("kind") == "operation_chain":
+            first_blank, second_blank = steps
+            if user_number == first_blank:
+                return f"Đúng rồi, ô trống đầu tiên là {_format_int(first_blank)}. Giờ con lấy {_format_int(first_blank)} chia 5 nhé."
+            if user_number == second_blank:
+                return _line_block([
+                    f"Đúng rồi, ô cuối là {_format_int(second_blank)}.",
+                    f"Đáp số: {_format_int(second_blank)}.",
+                    "Kiến thức cần nhớ: chuỗi thao tác thì làm từ trái sang phải.",
+                ])
+        elif solved.get("kind") == "gift_then_subtract":
+            gifted, total, answer = steps
+            if user_number == gifted:
+                return f"Đúng rồi, mẹ cho thêm {_format_int(gifted)} {solved['unit']}. Giờ con tìm tất cả có bao nhiêu bông nhé."
+            if user_number == total:
+                return f"Đúng rồi, tất cả có {_format_int(total)} {solved['unit']}. Giờ con trừ tiếp 9 nhé."
+            if user_number == answer:
+                return _line_block([
+                    f"Đúng rồi, Lan còn lại {solved['answer_text']}.",
+                    f"Đáp số: {solved['answer_text']}.",
+                    "Kiến thức cần nhớ: bài nhiều bước thì làm lần lượt từng phần.",
+                ])
+        else:
+            if len(steps) >= 2 and user_number == steps[0]:
+                if solved["kind"] == "unit_rate":
+                    return f"Đúng rồi, con đã tìm được 1 {solved['group_name']} là {_format_int(steps[0])}. Giờ con tìm số của phần cần hỏi nhé."
+                if solved["kind"] == "multi_step_bricks":
+                    return f"Đúng rồi, bác đã mua {_format_int(steps[0])} viên gạch. Giờ con lấy 78 000 trừ {_format_int(steps[0])} nhé."
+                return f"Đúng rồi, đã bán {_format_int(steps[0])} {solved['unit']}. Giờ con tìm phần còn lại nhé."
+            if user_number == solved["answer_value"]:
+                return _line_block([
+                    f"Đúng rồi, kết quả là {solved['answer_text']}.",
+                    f"Đáp số: {solved['answer_text']}.",
+                    "Kiến thức cần nhớ: làm xong bước 1 rồi mới sang bước 2.",
+                ])
 
     if solved.get("kind") == "one_step_division":
         if user_number == solved["answer_value"]:
@@ -1117,6 +1439,40 @@ def _child_reply_for_supported_problem(
                 "Kiến thức cần nhớ: bài chia đều thì lấy tổng số chia cho số phần.",
             ])
 
+    if solved.get("kind") == "perimeter_square":
+        if user_number == 4:
+            return f"Đúng rồi, hình vuông có 4 cạnh. Giờ con lấy {solved['side']} nhân 4 nhé."
+        if user_number == solved["answer_value"]:
+            return _line_block([
+                f"Đúng rồi, chu vi là {solved['answer_text']}.",
+                f"Đáp số: {solved['answer_text']}.",
+                "Kiến thức cần nhớ: chu vi hình vuông bằng cạnh nhân 4.",
+            ])
+
+    if solved.get("kind") == "perimeter_rectangle":
+        summed, answer = solved["step_values"]
+        if user_number == summed:
+            return f"Đúng rồi, con đã tìm được {solved['length']} + {solved['width']} = {_format_int(summed)}. Giờ con nhân 2 nhé."
+        if user_number == answer:
+            return _line_block([
+                f"Đúng rồi, chu vi là {solved['answer_text']}.",
+                f"Đáp số: {solved['answer_text']}.",
+                "Kiến thức cần nhớ: chu vi hình chữ nhật bằng (dài + rộng) nhân 2.",
+            ])
+
+    if solved.get("kind") in {"predecessor", "successor", "unknown_minuend"}:
+        if user_number == solved["answer_value"]:
+            reminder = {
+                "predecessor": "số liền trước thì trừ 1.",
+                "successor": "số liền sau thì cộng 1.",
+                "unknown_minuend": "muốn tìm số bị trừ thì lấy hiệu cộng số trừ.",
+            }[solved["kind"]]
+            return _line_block([
+                f"Đúng rồi, kết quả là {solved['answer_text']}.",
+                f"Đáp số: {solved['answer_text']}.",
+                f"Kiến thức cần nhớ: {reminder}",
+            ])
+
     if allow_full_solution or support_level == "cach_giai":
         if solved.get("kind") == "unit_conversion_subtract":
             total_cm, answer = solved["step_values"]
@@ -1126,7 +1482,7 @@ def _child_reply_for_supported_problem(
                 f"Đáp số: {solved['answer_text']}.",
                 "Kiến thức cần nhớ: đổi về cùng đơn vị trước rồi mới tính.",
             ])
-        if solved.get("kind") in {"multi_step_bricks", "store_case", "unit_rate", "one_step_division"}:
+        if solved.get("kind") in {"multi_step_bricks", "store_case", "unit_rate", "one_step_division", "perimeter_square", "perimeter_rectangle", "predecessor", "successor", "unknown_minuend", "operation_chain", "gift_then_subtract"}:
             lines = []
             if solved.get("kind") == "multi_step_bricks":
                 bought, answer = solved["step_values"]
@@ -1146,8 +1502,35 @@ def _child_reply_for_supported_problem(
                     f"Bước 1: 1 {solved['group_name']} có {_format_int(one_part)} {solved['unit']}.",
                     f"Bước 2: Phần cần tìm có {solved['answer_text']}.",
                 ])
-            else:
+            elif solved.get("kind") == "one_step_division":
                 lines.append(f"Lấy tổng số chia cho số phần, được {solved['answer_text']}.")
+            elif solved.get("kind") == "perimeter_square":
+                lines.append(f"Hình vuông có 4 cạnh nên lấy {solved['side']} x 4 = {_format_int(solved['answer_value'])} cm.")
+            elif solved.get("kind") == "perimeter_rectangle":
+                summed, answer = solved['step_values']
+                lines.extend([
+                    f"Bước 1: {solved['length']} + {solved['width']} = {_format_int(summed)}.",
+                    f"Bước 2: {_format_int(summed)} x 2 = {_format_int(answer)} cm.",
+                ])
+            elif solved.get("kind") == "predecessor":
+                lines.append(f"Số liền trước của {_format_int(solved['base'])} là {_format_int(solved['answer_value'])}.")
+            elif solved.get("kind") == "successor":
+                lines.append(f"Số liền sau của {_format_int(solved['base'])} là {_format_int(solved['answer_value'])}.")
+            elif solved.get("kind") == "unknown_minuend":
+                lines.append(f"Muốn tìm số bị trừ, lấy {solved['difference']} + {solved['subtrahend']} = {_format_int(solved['answer_value'])}.")
+            elif solved.get("kind") == "operation_chain":
+                first_blank, second_blank = solved['step_values']
+                lines.extend([
+                    f"Ô trống thứ nhất: {solved['start']} - {solved['minus_value']} = {_format_int(first_blank)}.",
+                    f"Ô trống thứ hai: {_format_int(first_blank)} : {solved['divide_value']} = {_format_int(second_blank)}.",
+                ])
+            elif solved.get("kind") == "gift_then_subtract":
+                gifted, total, answer = solved['step_values']
+                lines.extend([
+                    f"Bước 1: Mẹ cho thêm {_format_int(gifted)} {solved['unit']}.",
+                    f"Bước 2: Lan có tất cả {_format_int(total)} {solved['unit']}.",
+                    f"Bước 3: Lan còn lại {_format_int(answer)} {solved['unit']}.",
+                ])
             lines.extend([
                 f"Đáp số: {solved['answer_text']}.",
                 "Kiến thức cần nhớ: đi đúng thứ tự các bước của bài.",
